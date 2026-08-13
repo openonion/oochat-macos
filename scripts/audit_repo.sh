@@ -62,7 +62,7 @@ PRUNE=(--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=build
        --exclude=*.svg --exclude=*.pdf --exclude=*.zip --exclude=*.jar
        --exclude=*.ico --exclude=*.webm --exclude=*.mp4 --exclude=*.webp
        --exclude=*.lock --exclude=*-lock.json --exclude=*.bin
-       --exclude=.audit-waivers)
+       --exclude=.audit-waivers --exclude=audit_repo.sh)
 
 # Cap per-check output. A check that dumps 4000 lines is not actionable, but the
 # true count still has to be reported or a truncated list reads as the whole list.

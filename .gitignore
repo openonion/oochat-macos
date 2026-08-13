@@ -19,10 +19,14 @@ htmlcov/
 
 # ConnectOnion identity and session state
 .co/
-ConnectOnionMacClient.xcodeproj/*
-!ConnectOnionMacClient.xcodeproj/xcshareddata/
-!ConnectOnionMacClient.xcodeproj/xcshareddata/xcschemes/
-!ConnectOnionMacClient.xcodeproj/xcshareddata/xcschemes/ConnectOnionMacClient.xcscheme
+# Ignore only the per-user parts of the project bundle. The previous rule was
+# `ConnectOnionMacClient.xcodeproj/*` with an allowlist, which excluded
+# project.pbxproj — the file Xcode cannot open the project without. It survived
+# in the inherited repository only because it had been committed before the rule
+# existed, and tracked files ignore .gitignore. A fresh clone-and-commit dropped
+# it, and CI failed with "missing its project.pbxproj file".
+ConnectOnionMacClient.xcodeproj/xcuserdata/
+ConnectOnionMacClient.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Xcode per-user state
 xcuserdata/
