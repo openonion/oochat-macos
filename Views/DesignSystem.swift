@@ -25,13 +25,18 @@ enum AppPalette {
         return accent(for: hash)
     }
 
+    // The ConnectOnion green, same ramp as the web and iOS clients
+    // (`--color-brand-*`): 600 #16A34A / 700 #15803D in light, 400 #4ADE80 /
+    // 500 #22C55E in dark. This was a terracotta gradient — a third brand colour
+    // across our clients, after the web green and iOS violet. One product should
+    // be one colour.
     static let brandStart = adaptive(
-        light: NSColor(srgbRed: 0.722, green: 0.337, blue: 0.231, alpha: 1),
-        dark: NSColor(srgbRed: 0.878, green: 0.478, blue: 0.373, alpha: 1)
+        light: NSColor(srgbRed: 0.086, green: 0.639, blue: 0.290, alpha: 1),
+        dark: NSColor(srgbRed: 0.290, green: 0.871, blue: 0.502, alpha: 1)
     )
     static let brandEnd = adaptive(
-        light: NSColor(srgbRed: 0.663, green: 0.306, blue: 0.200, alpha: 1),
-        dark: NSColor(srgbRed: 0.788, green: 0.396, blue: 0.302, alpha: 1)
+        light: NSColor(srgbRed: 0.082, green: 0.502, blue: 0.239, alpha: 1),
+        dark: NSColor(srgbRed: 0.133, green: 0.773, blue: 0.369, alpha: 1)
     )
     static let brand = brandStart
     static let brandGradient = LinearGradient(
