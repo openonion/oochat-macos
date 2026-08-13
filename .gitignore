@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.ruff_cache/
+.venv/
+.coverage
+coverage.xml
+htmlcov/
+.env
+.env.*
+!.env.example
+
+# Temporary project files
+.tmp/
+.playwright-mcp/
+
+# ConnectOnion identity and session state
+.co/
+ConnectOnionMacClient.xcodeproj/*
+!ConnectOnionMacClient.xcodeproj/xcshareddata/
+!ConnectOnionMacClient.xcodeproj/xcshareddata/xcschemes/
+!ConnectOnionMacClient.xcodeproj/xcshareddata/xcschemes/ConnectOnionMacClient.xcscheme
+
+# Xcode per-user state
+xcuserdata/

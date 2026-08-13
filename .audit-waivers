@@ -1,0 +1,29 @@
+# Reviewed exceptions to the pre-publication audit.
+#
+# Format:  <path-prefix>  <rule-keyword>  # <reason>
+#
+# BOTH fields are required. A path-only waiver would hide every other rule on
+# that path — which is exactly how a waiver added here for loopback addresses
+# also buried leftover coursework wording in docs/ until it was caught by hand.
+# Waived hits are still printed by the audit; they only stop blocking.
+#
+# This client deliberately manages a local agent in Docker, so the loopback
+# address is part of the product rather than a leftover development endpoint.
+# Binding to loopback IS the security property: the local agent must not be
+# reachable from other machines.
+
+Dockerfile                      endpoint  # Healthcheck probes its own loopback port.
+docker-compose.yml              endpoint  # Publishes the agent to loopback only.
+docker-compose.integration.yml  endpoint  # Same, for the integration stack.
+tests/                          endpoint  # Python tests bind ephemeral loopback ports and
+                                          # assert the compose file publishes to loopback.
+ConnectOnionMacClientTests/     endpoint  # Swift tests feed loopback URLs into address
+                                          # normalisation and rejection paths.
+docs/                           endpoint  # Documentation shows the endpoint users curl.
+README.md                       endpoint  # The Configure table documents the local port.
+ViewModels/AgentTypes.swift     endpoint  # The one built-in discovery target, inside
+                                          # `#if DEBUG`. Release builds compile an empty
+                                          # list — see automaticDiscoveryTargets.
+ViewModels/ViewModels.swift     endpoint  # Rejects loopback hosts when validating a
+                                          # user-entered address; the literals are the
+                                          # denylist itself.

@@ -1,0 +1,107 @@
+name: Basic CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+  push:
+    branches:
+      - main
+
+jobs:
+  macos-tests:
+    name: Test macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew bundle --file Brewfile
+
+      - name: Lint Swift
+        env:
+          SWIFTLINT_REPORTER: github-actions-logging
+        run: ./scripts/run_lint.sh swift
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: List Xcode schemes
+        run: xcodebuild -list -project ConnectOnionMacClient.xcodeproj
+
+      - name: Run Swift tests
+        run: |
+          xcodebuild test \
+            -project ConnectOnionMacClient.xcodeproj \
+            -scheme ConnectOnionMacClient \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -enableCodeCoverage YES \
+            -resultBundlePath "${RUNNER_TEMP}/ConnectOnionMacClient.xcresult" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Report Swift code coverage
+        run: |
+          xcrun xccov view --report --only-targets \
+            "${RUNNER_TEMP}/ConnectOnionMacClient.xcresult"
+
+  python-tests:
+    name: Test Python host agent
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime and test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint Python
+        run: ./scripts/run_lint.sh python
+
+      - name: Check Python syntax
+        run: python -m py_compile host_agent.py
+
+      - name: Run Python tests and enforce coverage
+        env:
+          PYTHON_TEST_EXECUTABLE: python
+        run: ./scripts/run_python_tests.sh
+
+      - name: Run focused robustness tests
+        run: ./scripts/run_robustness_tests.sh
+
+  docker-image-tests:
+    name: Build and test production Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compose deployment contract
+        run: docker compose --env-file .env.example config --no-env-resolution --quiet
+
+      - name: Build production image
+        run: docker build --pull --tag connectonion-agent:test .
+
+      - name: Run regression tests inside the production image
+        run: |
+          docker run --rm --entrypoint python \
+            --volume "$PWD/evals:/app/evals:ro" \
+            connectonion-agent:test \
+            -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Run Docker Compose integration suite
+        env:
+          CONNECTONION_IMAGE: connectonion-agent:test
+          CONNECTONION_INTEGRATION_PROJECT: connectonion-ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./scripts/run_docker_integration_tests.sh

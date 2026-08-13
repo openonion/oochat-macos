@@ -1,0 +1,24 @@
+x-integration-environment: &integration-environment
+  OPENONION_API_KEY: integration-openonion-placeholder
+  OPENAI_API_KEY: integration-openai-placeholder
+  CONNECTONION_MODEL: gpt-4o-mini
+  CONNECTONION_RELAY_URL: ""
+  CONNECTONION_REMOTE_RELAY_URL: ""
+  CONNECTONION_TRUST: open
+  CONNECTONION_ENV: test
+
+x-integration-healthcheck: &integration-healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import os, urllib.request; port = os.environ.get('CONNECTONION_HOST_PORT', '8000'); urllib.request.urlopen('http://127.0.0.1:' + port + '/health', timeout=1)"
+  interval: 2s
+  timeout: 2s
+  start_period: 1s
+  retries: 30
+
+services:
+  agent:
+    environment: *integration-environment
+    healthcheck: *integration-healthcheck

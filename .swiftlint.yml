@@ -1,0 +1,73 @@
+excluded:
+  - .build
+  - .co
+  - .ruff_cache
+  - .tmp
+  - .venv
+  - DerivedData
+  - build
+
+allow_zero_lintable_files: false
+check_for_updates: false
+strict: true
+reporter: xcode
+
+opt_in_rules:
+  - contains_over_filter_count
+  - empty_count
+  - first_where
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - last_where
+  - redundant_nil_coalescing
+  - sorted_first_last
+
+force_cast:
+  severity: error
+
+force_try:
+  severity: error
+
+force_unwrapping:
+  severity: error
+
+implicitly_unwrapped_optional:
+  severity: error
+
+trailing_whitespace:
+  ignores_empty_lines: false
+  ignores_comments: false
+  severity: error
+
+line_length:
+  warning: 140
+  error: 200
+  ignores_comments: true
+  ignores_urls: true
+  ignores_function_declarations: true
+  ignores_interpolated_strings: true
+
+# Size thresholds sit just above what this codebase measures, not at SwiftLint's
+# defaults, so that raising one is a deliberate act rather than a silent one.
+# The file ceiling is ConnectOnionRemoteAgent.swift at 1479 counted lines: the
+# protocol client actor and the two extensions that reach its private stored
+# state have to share a file, and separating them would mean widening that
+# state. Every other source file is under 1100 lines and every test file under
+# 750.
+file_length:
+  warning: 1600
+  error: 1800
+  ignore_comment_only_lines: true
+
+type_body_length:
+  warning: 800
+  error: 900
+
+function_body_length:
+  warning: 250
+  error: 350
+
+cyclomatic_complexity:
+  warning: 15
+  error: 30
+  ignores_case_statements: true

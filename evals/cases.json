@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "direct_conversation_has_no_agent_overhead",
+      "prompt": "你好",
+      "expect": {
+        "max_tool_calls": 0,
+        "forbidden_output": ["Understanding", "Verification"],
+        "max_assistant_history_injections": 0,
+        "max_active_modes": 1
+      }
+    },
+    {
+      "id": "planning_does_not_pollute_conversation",
+      "prompt": "实现一个多步骤功能并运行测试",
+      "expect": {
+        "max_assistant_history_injections": 0,
+        "max_active_modes": 1
+      }
+    },
+    {
+      "id": "interrupt_stops_new_tools",
+      "prompt": "运行一个多步骤工具任务，然后中断",
+      "expect": {
+        "status": "cancelled",
+        "max_tools_started_after_cancel": 0,
+        "max_active_modes": 1
+      }
+    },
+    {
+      "id": "execution_mode_is_exclusive",
+      "prompt": "依次切换 Plan、ULW、Safe",
+      "expect": {
+        "max_active_modes": 1
+      }
+    }
+  ]
+}

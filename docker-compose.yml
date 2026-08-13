@@ -1,0 +1,29 @@
+name: connectonion-mac-client
+
+services:
+  agent:
+    build: .
+    image: ${CONNECTONION_IMAGE:-co-agent:1.0}
+    ports:
+      - "127.0.0.1:${CONNECTONION_AGENT_PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CONNECTONION_WORKSPACE: /agent-work
+      CONNECTONION_RELAY_URL: ""
+    volumes:
+      - co-identity:/home/appuser/.co
+      - co-workspace:/agent-work
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  co-identity:
+  co-workspace:
