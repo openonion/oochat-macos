@@ -1,6 +1,7 @@
 # oochat for macOS
 
-[![CI](https://github.com/openonion/oochat-macos/actions/workflows/ci.yml/badge.svg)](https://github.com/openonion/oochat-macos/actions/workflows/ci.yml)
+[![Basic CI](https://github.com/openonion/oochat-macos/actions/workflows/ci.yml/badge.svg)](https://github.com/openonion/oochat-macos/actions/workflows/ci.yml)
+[![Pre-publication audit](https://github.com/openonion/oochat-macos/actions/workflows/audit.yml/badge.svg)](https://github.com/openonion/oochat-macos/actions/workflows/audit.yml)
 
 Native SwiftUI desktop client for [ConnectOnion](https://docs.connectonion.com/)
 agents. Connect to an agent by its `0x…` address and talk to it — the same
