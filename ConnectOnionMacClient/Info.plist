@@ -7,7 +7,7 @@
 	<key>ATSApplicationFontsPath</key>
 	<string>Fonts</string>
 	<key>ConnectOnionDockerImage</key>
-	<string>ghcr.io/openonion/oochat-macos-agent:1.0.1</string>
+	<string>ghcr.io/openonion/oochat-macos-agent:1.0.2</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record voice messages for transcription by ConnectOnion.</string>
 </dict>

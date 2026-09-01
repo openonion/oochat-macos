@@ -15,7 +15,7 @@ distribution, not a Mac App Store release.
    project.
 2. Change `ConnectOnionDockerImage` in `ConnectOnionMacClient/Info.plist` to the
    exact same version, for example
-   `ghcr.io/openonion/oochat-macos-agent:1.0.1`.
+   `ghcr.io/openonion/oochat-macos-agent:1.0.2`.
 3. Update release-facing documentation, push the commit to `main`, and wait for
    Basic CI and the pre-publication audit to pass.
 4. Confirm the GHCR package is public. The release workflow logs out and pulls
@@ -25,11 +25,11 @@ distribution, not a Mac App Store release.
 
 ## Publish
 
-For version `1.0.1`:
+For version `1.0.2`:
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 The workflow refuses a malformed tag, a tag that differs from

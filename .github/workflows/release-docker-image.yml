@@ -121,12 +121,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Run Swift release tests
+      - name: Run Swift tests
         run: |
+          # Tests use @testable imports; the archive step separately compiles Release.
           xcodebuild test \
             -project ConnectOnionMacClient.xcodeproj \
             -scheme ConnectOnionMacClient \
-            -configuration Release \
+            -configuration Debug \
             -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO
 
