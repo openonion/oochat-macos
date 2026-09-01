@@ -121,6 +121,14 @@ the app manages; it is not part of the client itself.
 | [Guide for Experienced Users](docs/user-guide-experienced.md) | Full walkthrough including credits, keys and tests |
 | [Run Guide](docs/team-guide.md) | Build, run, logs, test — the day-to-day commands |
 | [Robustness Testing](docs/robustness-testing.md) | Failure matrix, invariants, and where the live-model boundary sits |
+| [Release Guide](docs/RELEASE.md) | Version bump, tag workflow, DMG and GHCR publishing |
+
+## Releases
+
+Semantic version tags publish two matched artifacts: an ad-hoc-signed macOS DMG
+on GitHub Releases and a multi-architecture local-agent image on GHCR. The app
+pins the exact image version in `Info.plist`. See [docs/RELEASE.md](docs/RELEASE.md)
+for the required version changes and verification gates.
 
 ## Tests
 

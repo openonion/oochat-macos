@@ -11,9 +11,9 @@ ConnectOnion consists of two parts:
 - The **Main Agent** is a Python service running in Docker Compose. It is the
   only locally deployed backend service and is exposed only on
   `127.0.0.1:8000`.
-- The **macOS client** is a native SwiftUI application run from Xcode in the
-  Debug configuration. A native macOS GUI cannot run in the Linux Docker image,
-  and packaged distribution is out of scope for this release.
+- The **macOS client** is a native SwiftUI application. It can be built from
+  source in Xcode or installed from the ad-hoc-signed DMG attached to a tagged
+  GitHub Release. A native macOS GUI cannot run in the Linux Docker image.
 
 Docker Desktop remains a required dependency because the client starts and
 stops the Main Agent. Delivering the native client from source rather than as
@@ -44,6 +44,13 @@ Expected result: `docker version` reports both Client and Server sections, and
 `docker compose version` reports Compose v2.
 
 ## 3. Obtain and build the project
+
+For a prebuilt client, download the DMG and matching `.sha256` from
+<https://github.com/openonion/oochat-macos/releases>. Verify the checksum, open
+the DMG, and drag the app to Applications. The DMG is ad-hoc signed rather than
+Apple-notarized, so the first launch may require Finder → right-click → Open.
+
+To build from source, continue below.
 
 If you received the project as an archive, unzip it, `cd`
 into the extracted folder, and run only the last two commands below.
@@ -215,10 +222,8 @@ docker logs --tail 200 connectonion-mac-client-agent-1
 - Files saved with **Save As…** or **Save to Desktop** are copies outside the
   container and remain after a chat is deleted.
 
-## 10. Submission checklist
+## 10. Release checklist
 
-- [ ] Export this document to `ConnectOnion-Installation-Manual.pdf` and upload
-      it alongside the ZIP.
 - [ ] Run `./scripts/run_lint.sh` and `./scripts/run_tests.sh` on the final commit.
 - [ ] Verify the Main Agent with the `DEMO_READY` acceptance check.
 - [ ] Do not include `.env`, API keys, recovery phrases, `.co` state, or local
