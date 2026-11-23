@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import UniformTypeIdentifiers
+import ConnectOnionKit
 
 /// Drives a single conversation: transcript, composer, attachments, voice
 /// input, and runtime interactions, all mirrored into the shared AppViewModel
@@ -18,6 +19,7 @@ class ChatViewModel: ObservableObject {
     @Published var pendingInteraction: ConnectOnionPendingInteraction?
     @Published var interactionError: String?
     @Published var recoveryStatus: String?
+    @Published var incompatibility: OIPHandshake.Incompatibility?
     @Published var isSubmittingInteraction = false
     @Published private(set) var latestUsage: ChatUsageSummary?
     /// Set after an interrupt so every trailing event from that cancelled run
@@ -226,6 +228,24 @@ class ChatViewModel: ObservableObject {
             recoveryStatus = nil
             finishActiveExecutionRun(with: .done)
             markOutstandingMessages(as: .sent)
+
+        case .incompatible(let incompatibility):
+            pendingUsage = nil
+            isSubmittingInteraction = false
+            pendingInteraction = nil
+            let replyToMessageID = activeRequestMessageID
+            finishActiveExecutionRun(with: .error)
+            markOutstandingMessages(as: .error)
+            if configuration.connectionType == .byAddress {
+                appViewModel.setAgentConnected(configuration, isConnected: false)
+            }
+            self.incompatibility = incompatibility
+            appendAgentMessage(
+                incompatibility.message,
+                replyToMessageID: replyToMessageID,
+                artifacts: consumePendingArtifacts(),
+                artifactWarnings: consumePendingArtifactWarnings()
+            )
 
         case .error(let message):
             pendingUsage = nil

@@ -62,6 +62,22 @@ struct ChatView: View {
                 isFileDropTargeted = isTargeted
             }
         }
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.incompatibility != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        viewModel.incompatibility = nil
+                    }
+                }
+            )
+        ) {
+            if let incompatibility = viewModel.incompatibility {
+                IncompatibleAgentView(incompatibility: incompatibility) {
+                    viewModel.incompatibility = nil
+                }
+            }
+        }
         .navigationTitle("")
         .toolbarBackground(AppPalette.toolbarSurface, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)

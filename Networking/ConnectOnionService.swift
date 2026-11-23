@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import ConnectOnionKit
 
 /// Facade over the hosted-agent connection: validates 0x address and Direct URL
 /// targets, delegates the protocol lifecycle to the remote-agent client, and
@@ -261,7 +262,12 @@ final class ConnectOnionService: ObservableObject {
                 hostedAgentStatusDetail = error.localizedDescription
                 isHostedAgentStatusLive = false
             }
-            incomingEvents.send(.error(error.localizedDescription))
+            // -32010 gets its own screen. Every other failure keeps the old error event.
+            if let incompatibility = (error as? ConnectOnionRemoteError)?.incompatibility {
+                incomingEvents.send(.incompatible(incompatibility))
+            } else {
+                incomingEvents.send(.error(error.localizedDescription))
+            }
         }
     }
 

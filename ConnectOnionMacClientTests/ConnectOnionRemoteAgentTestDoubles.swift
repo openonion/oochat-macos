@@ -48,6 +48,8 @@ actor RemoteProtocolRecorder {
             events.append("interrupted")
         case .error(let value):
             events.append("error:\(value)")
+        case .incompatible(let value):
+            events.append("incompatible:\(value.neededVersion ?? "unknown")")
         }
     }
 

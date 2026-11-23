@@ -123,6 +123,7 @@ struct MessageView: View {
                 Spacer()
                 Text(message.content)
                     .font(.system(size: fontSize - 2))
+
                     .foregroundColor(.secondary)
                     .padding(8)
                     .background(Capsule().fill(Color.secondary.opacity(0.1)))
