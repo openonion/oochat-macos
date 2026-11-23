@@ -6,6 +6,7 @@ excluded:
   - .venv
   - DerivedData
   - build
+  - Packages/ConnectOnionKit/.build
 
 allow_zero_lintable_files: false
 check_for_updates: false

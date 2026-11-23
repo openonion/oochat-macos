@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 import XCTest
@@ -30,7 +31,7 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
     }
 
     func testJSONValueConvertsEverySupportedFoundationShapeAndRoundTrips() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "string": "value",
                 "boolean": true,
@@ -56,11 +57,11 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
 
         let encoded = try JSONEncoder().encode(value)
         XCTAssertEqual(
-            try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded),
+            try JSONDecoder().decode(JSONValue.self, from: encoded),
             value
         )
         XCTAssertTrue(value.displayText.contains("\"boolean\" : true"))
-        XCTAssertEqual(ConnectOnionJSONValue(any: NSNull()), .null)
+        XCTAssertEqual(JSONValue(any: NSNull()), .null)
     }
 
     func testRelayReachabilityCoversExplicitAndInferredRoutes() throws {
@@ -139,34 +140,12 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
             ConnectOnionULWCheckpointDecision.returnToSafe.message["mode"] as? String,
             "safe"
         )
-        XCTAssertEqual(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: nil
-            )["type"] as? String,
-            "INTERRUPT"
-        )
-        XCTAssertNotNil(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: nil
-            )["requested_at_ms"] as? Int
-        )
-        XCTAssertNil(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(inputID: nil)["input_id"],
-            "With no active run there is no input_id to correlate."
-        )
-        XCTAssertEqual(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: "input-42"
-            )["input_id"] as? String,
-            "input-42",
-            "The interrupt must name the run it targets so the peer can echo it back."
-        )
     }
 
     func testApprovalRequestsExplainEverySupportedOperation() {
         func request(
             _ tool: String,
-            arguments: [String: ConnectOnionJSONValue] = [:]
+            arguments: [String: JSONValue] = [:]
         ) -> ConnectOnionApprovalRequest {
             ConnectOnionApprovalRequest(
                 id: UUID().uuidString,

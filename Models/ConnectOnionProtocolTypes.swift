@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// Connection status pushed to the UI while a request runs; `isLive` separates
@@ -11,31 +12,7 @@ nonisolated struct ConnectOnionTransportUpdate: Sendable {
 /// Schemaless JSON tree used wherever the protocol carries free-form payloads
 /// such as tool arguments and relay metadata. Bridging from Foundation
 /// collapses unrecognized values to `.null` rather than throwing.
-nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: ConnectOnionJSONValue])
-    case array([ConnectOnionJSONValue])
-    case null
-
-    init(any value: Any) {
-        switch value {
-        case let value as String:
-            self = .string(value)
-        case let value as Bool:
-            self = .bool(value)
-        case let value as NSNumber:
-            self = .number(value.doubleValue)
-        case let value as [String: Any]:
-            self = .object(value.mapValues(Self.init(any:)))
-        case let value as [Any]:
-            self = .array(value.map(Self.init(any:)))
-        default:
-            self = .null
-        }
-    }
-
+nonisolated extension JSONValue {
     var displayText: String {
         guard let data = try? JSONEncoder().encode(self),
               let object = try? JSONSerialization.jsonObject(with: data),
@@ -48,46 +25,6 @@ nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
         }
         return String(data: prettyData, encoding: .utf8) ?? "null"
     }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([String: Self].self) {
-            self = .object(value)
-        } else if let value = try? container.decode([Self].self) {
-            self = .array(value)
-        } else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unsupported JSON value"
-            )
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
 }
 
 /// A decoded `approval_needed` prompt: the tool call awaiting consent plus
@@ -95,9 +32,9 @@ nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
 nonisolated struct ConnectOnionApprovalRequest: Identifiable, Hashable, Sendable {
     let id: String
     let tool: String
-    let arguments: ConnectOnionJSONValue
+    let arguments: JSONValue
     let description: String?
-    let batchRemaining: [ConnectOnionJSONValue]
+    let batchRemaining: [JSONValue]
 }
 
 /// Keyword heuristics that rank and explain a pending tool call so the
@@ -262,6 +199,24 @@ nonisolated enum AgentExecutionMode: String, Codable, CaseIterable, Hashable, Se
     case accept = "ulw"
 
     static let acceptTurns = 10
+
+    /// The host's mode matching the execution mode. Safe maps to auto (agent asks before tool use),
+    /// Plan to read-only, Accept to full-access (run without asking for set turns)
+    var permissionMode: OIPPermissionMode {
+        switch self {
+        case .safe: return .auto
+        case .plan: return .readOnly
+        case .accept: return .fullAccess
+        }
+    }
+
+    // Convert host mode to corresponding app mode (reverse conversion)
+    init?(permissionMode: OIPPermissionMode) {
+        guard let mode = Self.allCases.first(where: { $0.permissionMode == permissionMode }) else {
+            return nil
+        }
+        self = mode
+    }
 
     var displayName: String {
         switch self {

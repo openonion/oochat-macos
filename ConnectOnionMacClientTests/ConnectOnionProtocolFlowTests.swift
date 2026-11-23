@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import XCTest
+import ConnectOnionKit
+
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionRemoteAgentTests {
@@ -63,23 +65,13 @@ extension ConnectOnionRemoteAgentTests {
         XCTAssertEqual(summary.contextPercent, 20)
     }
 
-    func testInputMessagesSignDirectAndRelayPayloadsAndIncludeFiles() throws {
+    func testInputFramesAreSignedAndIncludeFiles() throws {
         let privateKeyData = Data((0..<32).map(UInt8.init))
         let identity = try ConnectOnionIdentity(rawPrivateKey: privateKeyData)
         let address = makeAddress("78")
-        let direct = ConnectOnionResolvedEndpoint(
-            agentAddress: address,
-            webSocketURL: URL(string: "wss://agent.test/ws")!,
-            httpBaseURL: URL(string: "https://agent.test")!,
-            isDirect: true,
-            info: nil
-        )
-        let relay = ConnectOnionResolvedEndpoint(
-            agentAddress: address,
-            webSocketURL: relayWebSocketURL,
-            httpBaseURL: nil,
-            isDirect: false,
-            info: nil
+        let frames = OIPClientFrames(
+            keyStore: InMemoryPrivateKeyStore(rawKey: privateKeyData),
+            to: address
         )
         let file = ConnectOnionInputFile(
             name: "notes.txt",
@@ -87,41 +79,20 @@ extension ConnectOnionRemoteAgentTests {
             data: Data("hello".utf8)
         )
 
-        let directMessage = try ConnectOnionRemoteAgentClient.buildInputMessage(
+        let withFile = try frames.input(
+            inputID: "input-1",
             prompt: "Summarize",
-            files: [file],
-            inputID: "input-direct",
-            identity: identity,
-            endpoint: direct
-        )
-        XCTAssertNil(directMessage["to"])
-        XCTAssertEqual(directMessage["from"] as? String, identity.address)
-        XCTAssertEqual(
-            directMessage["files"] as? [[String: String]],
-            [file.protocolObject]
-        )
-        try assertValidSignature(
-            in: directMessage,
-            privateKeyData: privateKeyData
-        )
+            files: [JSONValue(any: file.protocolObject)]
+        ).mapValues { $0.anyValue }
+        XCTAssertEqual(withFile["to"] as? String, address)
+        XCTAssertEqual(withFile["from"] as? String, identity.address)
+        XCTAssertEqual(withFile["files"] as? [[String: String]], [file.protocolObject])
+        try assertValidSignature(in: withFile, privateKeyData: privateKeyData)
 
-        let relayMessage = try ConnectOnionRemoteAgentClient.buildInputMessage(
-            prompt: "Continue",
-            files: [],
-            inputID: "input-relay",
-            identity: identity,
-            endpoint: relay
-        )
-        XCTAssertEqual(relayMessage["to"] as? String, address)
-        XCTAssertEqual(
-            (relayMessage["payload"] as? [String: Any])?["to"] as? String,
-            address
-        )
-        XCTAssertNil(relayMessage["files"])
-        try assertValidSignature(
-            in: relayMessage,
-            privateKeyData: privateKeyData
-        )
+        let withoutFile = try frames.input(inputID: "input-2", prompt: "Continue")
+            .mapValues { $0.anyValue }
+        XCTAssertNil(withoutFile["files"])
+        try assertValidSignature(in: withoutFile, privateKeyData: privateKeyData)
     }
 
     func testAgentImageValidationRejectsMissingHostsAndUnsafeSchemes() throws {
@@ -363,6 +334,8 @@ extension ConnectOnionRemoteAgentTests {
         XCTAssertTrue(sentTypes.contains("ASK_USER_RESPONSE"))
         XCTAssertTrue(sentTypes.contains("mode_change"))
 
+        try assertCommandsAreSignedAndAnswersNameTheirPrompt(sentObjects)
+
         let storedStateData = try XCTUnwrap(
             UserDefaults.standard.data(forKey: storageKey)
         )
@@ -395,4 +368,31 @@ extension ConnectOnionRemoteAgentTests {
         )
     }
 
+    /// 19.2 and 16.3: every non-exempt frame is a signed command, each answer names the `id`
+    /// of the prompt it answers, and mode_change uses the host's canonical mode id.
+    private func assertCommandsAreSignedAndAnswersNameTheirPrompt(
+        _ sentObjects: [[String: Any]]
+    ) throws {
+        let signedFrames = sentObjects.filter {
+            !OIPClientFrames.v2ExemptTypes.contains($0["type"] as? String ?? "")
+        }
+        XCTAssertFalse(signedFrames.isEmpty)
+        for frame in signedFrames {
+            let payload = try XCTUnwrap(
+                frame["payload"] as? [String: Any],
+                "\(frame["type"] ?? "?") was sent unsigned"
+            )
+            XCTAssertNotNil(payload["to"] as? String)
+            XCTAssertNotNil(payload["nonce"] as? String)
+            XCTAssertNotNil(frame["signature"] as? String)
+        }
+
+        func signedPayload(_ type: String) throws -> [String: Any] {
+            let frame = try XCTUnwrap(sentObjects.first { $0["type"] as? String == type })
+            return try XCTUnwrap(frame["payload"] as? [String: Any])
+        }
+        XCTAssertEqual(try signedPayload("ASK_USER_RESPONSE")["request_id"] as? String, "ask-1")
+        XCTAssertEqual(try signedPayload("APPROVAL_RESPONSE")["request_id"] as? String, "approval-1")
+        XCTAssertEqual(try signedPayload("mode_change")["mode"] as? String, "read-only")
+    }
 }
