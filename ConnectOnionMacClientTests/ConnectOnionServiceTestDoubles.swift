@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import XCTest
+import ConnectOnionKit
 @testable import ConnectOnionMacClient
 
 enum StubRemoteOperation: Hashable {
@@ -14,6 +15,7 @@ enum StubRemoteOperation: Hashable {
     case planReview
     case ulwCheckpoint
     case inviteCode
+    case exec
 }
 
 private enum StubRemoteError: LocalizedError {
@@ -38,17 +40,21 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
     private var desiredMode: AgentExecutionMode = .safe
     private var confirmedMode: AgentExecutionMode = .safe
     let emitsApprovalOnSend: Bool
+    /// Sent after the stub's own events on each send.
+    let eventsOnSend: [ConnectOnionTransportEvent]
 
     init(
         endpoint: ConnectOnionResolvedEndpoint,
         pendingExecution: Bool = false,
         failures: Set<StubRemoteOperation> = [],
-        emitsApprovalOnSend: Bool = false
+        emitsApprovalOnSend: Bool = false,
+        eventsOnSend: [ConnectOnionTransportEvent] = []
     ) async {
         self.endpoint = endpoint
         self.pendingExecution = pendingExecution
         self.failures = failures
         self.emitsApprovalOnSend = emitsApprovalOnSend
+        self.eventsOnSend = eventsOnSend
     }
 
     func probe() async throws -> ConnectOnionResolvedEndpoint {
@@ -111,6 +117,9 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
             )
         }
         await onEvent(.modeChanged(.accept))
+        for event in eventsOnSend {
+            await onEvent(event)
+        }
         return "stub response"
     }
 
@@ -173,6 +182,25 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
 
     func disconnect() async {
         calls.append("disconnect")
+    }
+
+    var execReply: [String: JSONValue] = ["status": .string("success"), "result": .string("stub output")]
+
+    func runExec(
+        execID: String,
+        tool: String,
+        args _: [String: JSONValue]
+    ) async throws -> OIPExecResult {
+        calls.append("runExec:\(tool)")
+        try failIfNeeded(.exec)
+        var frame = execReply
+        frame["type"] = .string("EXEC_RESULT")
+        frame["exec_id"] = .string(execID)
+        frame["tool"] = .string(tool)
+        guard case .execResult(let result) = OIPServerFrame.decode(frame) else {
+            throw StubRemoteError.failed(.exec)
+        }
+        return result
     }
 
     func setPendingExecution(_ value: Bool) {

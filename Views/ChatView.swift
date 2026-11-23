@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ConnectOnionKit
 
 /// Selects the messages, execution runs, and approvals visible in the chat.
 struct ChatView: View {
@@ -11,10 +12,14 @@ struct ChatView: View {
     @State private var keyMonitor: Any?
     @State private var isFileDropTargeted = false
     @FocusState private var isInputFocused: Bool
+    @State private var selectedSkillIndex = 0
+    @State private var isKeyboardNavigatingSkills = false
 
     private let minChatFontSize: Double = 12
     private let maxChatFontSize: Double = 26
     private let chatFontStep: Double = 1
+    private let skillPaletteMaxHeight: CGFloat = 240
+    private let skillPaletteRowHeight: CGFloat = 44
 
     init(
         viewModel: ChatViewModel,
@@ -62,9 +67,30 @@ struct ChatView: View {
                 isFileDropTargeted = isTargeted
             }
         }
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.incompatibility != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        viewModel.incompatibility = nil
+                    }
+                }
+            )
+        ) {
+            if let incompatibility = viewModel.incompatibility {
+                IncompatibleAgentView(incompatibility: incompatibility) {
+                    viewModel.incompatibility = nil
+                }
+            }
+        }
         .navigationTitle("")
         .toolbarBackground(AppPalette.toolbarSurface, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                SessionStatusHeader(service: viewModel.service)
+            }
+        }
     }
 
     private var hasStartedConversation: Bool {
@@ -73,6 +99,170 @@ struct ChatView: View {
 
     private var pendingApproval: ConnectOnionApprovalRequest? {
         ChatViewPresentation.approvalRequest(from: viewModel.pendingInteraction)
+    }
+
+    private var skillPaletteQuery: String? {
+        let text = viewModel.inputText
+
+        guard text.hasPrefix("/") else { return nil }
+
+        let query = String(text.dropFirst())
+
+        // Only show the palette while entering the skill name, not after the user has started entering arguments.
+        guard !query.contains(where: \.isWhitespace) else {
+            return nil
+        }
+
+        return query
+    }
+
+    private var filteredSkills: [OIPAgentSkill] {
+        guard let skills = viewModel.agentProfile?.skills,
+              let query = skillPaletteQuery else {
+            return []
+        }
+
+        let rankedNames = SkillSearch.rank(
+            skills.map(\.name),
+            query: query
+        )
+
+        return rankedNames.compactMap { name in
+            skills.first { $0.name == name }
+        }
+    }
+
+    private var skillPalette: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if filteredSkills.isEmpty {
+                            Text(
+                                viewModel.agentProfile == nil
+                                    ? "Loading agent skills…"
+                                    : (viewModel.agentProfile?.skills.isEmpty == true
+                                        ? "This agent has no skills."
+                                        : "No matching skills.")
+                            )
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                        } else {
+                            ForEach(
+                                Array(filteredSkills.enumerated()),
+                                id: \.element.name
+                            ) { index, skill in
+                                Button {
+                                    viewModel.inputText = "/\(skill.name) "
+                                    isInputFocused = true
+                                } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                        Text("/\(skill.name)")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(OOColor.ink)
+                                            .fixedSize(horizontal: true, vertical: false)
+
+                                        if let description = skill.description,
+                                           !description.isEmpty {
+                                            Text(description)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(OOColor.inkSecondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
+                                        }
+
+                                        Spacer(minLength: 0)
+                                    }
+                                    .ooRow(isSelected: index == selectedSkillIndex)
+                                    .onHover { isHovering in
+                                        guard isHovering, !isKeyboardNavigatingSkills else { return }
+                                        selectedSkillIndex = index
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .id(skill.name)
+                            }
+                        }
+                    }
+                }
+                .frame(
+                    height: min(
+                        CGFloat(filteredSkills.count) * skillPaletteRowHeight,
+                        skillPaletteMaxHeight
+                    )
+                )
+                .onChange(of: selectedSkillIndex) { _, newIndex in
+                    guard filteredSkills.indices.contains(newIndex) else {
+                        return
+                    }
+
+                    withAnimation {
+                        proxy.scrollTo(
+                            filteredSkills[newIndex].name,
+                            anchor: .center
+                        )
+                    }
+                }
+                .onChange(of: filteredSkills.map(\.name)) { _, _ in
+                    proxy.scrollTo(
+                        filteredSkills.indices.contains(selectedSkillIndex)
+                            ? filteredSkills[selectedSkillIndex].name
+                            : filteredSkills.first?.name ?? "",
+                        anchor: .top
+                    )
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 5) {
+                Text("↑↓")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("navigate")
+                Text("·")
+
+                Text("Tab")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("complete")
+                Text("·")
+
+                Text("Esc")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("dismiss")
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            OOColor.paper,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(OOColor.hairline, lineWidth: 1)
+        }
+        .onContinuousHover { phase in
+            if case .active = phase {
+                isKeyboardNavigatingSkills = false
+            }
+        }
     }
 
     private func executionRuns(for message: ChatMessage) -> [ExecutionRun] {
@@ -88,6 +278,12 @@ struct ChatView: View {
 
     private var chatBody: some View {
         VStack(spacing: 0) {
+            AgentBalanceNotice(
+                balanceUSD: viewModel.agentProfile?.balanceUSD,
+                agentAddress: viewModel.agentProfile?.address
+                    ?? viewModel.configuration.addressConfiguration?.agentAddress
+            )
+
             if !hasStartedConversation {
                 WelcomeHomeView(
                     configuration: viewModel.configuration,
@@ -262,6 +458,12 @@ struct ChatView: View {
                         .foregroundColor(.secondary)
                 }
 
+                if !filteredSkills.isEmpty {
+                    skillPalette
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 HStack(spacing: 10) {
                     Button(action: openFilePanel) {
                         Image(systemName: "plus")
@@ -286,7 +488,69 @@ struct ChatView: View {
                     .lineLimit(1...5)
                     .disabled(viewModel.pendingInteraction != nil)
                     .onSubmit {
-                        viewModel.sendMessage()
+                        if let completion = SkillPaletteNavigation.completion(
+                            for: filteredSkills.map(\.name),
+                            selectedIndex: selectedSkillIndex
+                        ) {
+                            viewModel.inputText = completion
+                            isInputFocused = true
+                        } else {
+                            viewModel.sendMessage()
+                        }
+                    }
+                    .onChange(of: skillPaletteQuery) { _, _ in
+                        selectedSkillIndex = 0
+                    }
+                    .onKeyPress(.downArrow) {
+                        guard skillPaletteQuery != nil,
+                              let nextIndex = SkillPaletteNavigation.movedIndex(
+                                  currentIndex: selectedSkillIndex,
+                                  skillCount: filteredSkills.count,
+                                  offset: 1
+                              ) else {
+                            return .ignored
+                        }
+
+                        isKeyboardNavigatingSkills = true
+                        selectedSkillIndex = nextIndex
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        guard skillPaletteQuery != nil,
+                              let nextIndex = SkillPaletteNavigation.movedIndex(
+                                  currentIndex: selectedSkillIndex,
+                                  skillCount: filteredSkills.count,
+                                  offset: -1
+                              ) else {
+                            return .ignored
+                        }
+
+                        isKeyboardNavigatingSkills = true
+                        selectedSkillIndex = nextIndex
+                        return .handled
+                    }
+                    .onKeyPress(.tab) {
+                        guard skillPaletteQuery != nil,
+                              let completion = SkillPaletteNavigation.completion(
+                                  for: filteredSkills.map(\.name),
+                                  selectedIndex: selectedSkillIndex
+                              ) else {
+                            return .ignored
+                        }
+
+                        viewModel.inputText = completion
+                        isInputFocused = true
+                        return .handled
+                    }
+                    .onKeyPress(.escape) {
+                        guard skillPaletteQuery != nil,
+                              !filteredSkills.isEmpty else {
+                            return .ignored
+                        }
+
+                        viewModel.inputText = ""
+                        selectedSkillIndex = 0
+                        return .handled
                     }
 
                     Button(action: viewModel.toggleVoiceInput) {
@@ -328,7 +592,15 @@ struct ChatView: View {
                         if viewModel.isExecutionModeChangePending {
                             ProgressView()
                                 .controlSize(.mini)
+                            Text("\(viewModel.desiredExecutionMode.displayName) pending")
+                                .font(.system(size: AppFontSize.caption))
+                                .foregroundStyle(.secondary)
                                 .help("Waiting for the hosted agent to confirm the mode")
+                        } else if let turnsLeft = viewModel.acceptTurnsLeft {
+                            Text("\(turnsLeft) \(turnsLeft == 1 ? "turn" : "turns") left")
+                                .font(.system(size: AppFontSize.caption, weight: .medium))
+                                .foregroundStyle(AppPalette.error)
+                                .help("Accept mode ends after these turns")
                         }
                         ExecutionModeSelector(viewModel: viewModel)
                     }
@@ -347,6 +619,7 @@ struct ChatView: View {
                         )
                 )
                 .animation(.easeInOut(duration: 0.15), value: isInputFocused)
+                .animation(.easeInOut(duration: 0.15), value: filteredSkills.isEmpty)
                 }
             }
             .padding(.bottom, 14)
@@ -532,4 +805,39 @@ struct ChatView: View {
     }
 }
 
+enum SkillPaletteNavigation {
+    static func movedIndex(
+        currentIndex: Int,
+        skillCount: Int,
+        offset: Int
+    ) -> Int? {
+        guard skillCount > 0 else { return nil }
+
+        return (currentIndex + offset + skillCount) % skillCount
+    }
+
+    static func completion(
+        for skillNames: [String],
+        selectedIndex: Int
+    ) -> String? {
+        guard skillNames.indices.contains(selectedIndex) else {
+            return nil
+        }
+
+        return "/\(skillNames[selectedIndex]) "
+    }
+}
+
 /// Shows the latest session usage in a single compact line.
+
+/// The chat header's session words, from the kit through the service.
+private struct SessionStatusHeader: View {
+    @ObservedObject var service: ConnectOnionService
+
+    var body: some View {
+        OOStatusDot(
+            label: service.hostedAgentStatus,
+            isLive: service.isHostedAgentStatusLive
+        ).accessibilityLabel("Session status: \(service.hostedAgentStatus)")
+    }
+}

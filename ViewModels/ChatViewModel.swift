@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import UniformTypeIdentifiers
+import ConnectOnionKit
 
 /// Drives a single conversation: transcript, composer, attachments, voice
 /// input, and runtime interactions, all mirrored into the shared AppViewModel
@@ -18,8 +19,10 @@ class ChatViewModel: ObservableObject {
     @Published var pendingInteraction: ConnectOnionPendingInteraction?
     @Published var interactionError: String?
     @Published var recoveryStatus: String?
+    @Published var incompatibility: OIPHandshake.Incompatibility?
     @Published var isSubmittingInteraction = false
     @Published private(set) var latestUsage: ChatUsageSummary?
+    @Published private(set) var agentProfile: OIPAgentProfile?
     /// Set after an interrupt so every trailing event from that cancelled run
     /// is discarded instead of reaching the transcript.
     @Published private(set) var isDiscardingInterruptedEvents = false
@@ -145,6 +148,9 @@ class ChatViewModel: ObservableObject {
         case .usage(let usage):
             pendingUsage = usage
 
+        case .agentProfile(let profile):
+            agentProfile = profile
+
         case .executionItem(let item):
             upsertExecutionItem(item)
 
@@ -206,6 +212,9 @@ class ChatViewModel: ObservableObject {
         case .modeChanged:
             interactionError = nil
 
+        case .sessionModes:
+            break
+
         case .planReviewRequired(let request):
             pendingInteraction = .planReview(request)
             interactionError = nil
@@ -226,6 +235,24 @@ class ChatViewModel: ObservableObject {
             recoveryStatus = nil
             finishActiveExecutionRun(with: .done)
             markOutstandingMessages(as: .sent)
+
+        case .incompatible(let incompatibility):
+            pendingUsage = nil
+            isSubmittingInteraction = false
+            pendingInteraction = nil
+            let replyToMessageID = activeRequestMessageID
+            finishActiveExecutionRun(with: .error)
+            markOutstandingMessages(as: .error)
+            if configuration.connectionType == .byAddress {
+                appViewModel.setAgentConnected(configuration, isConnected: false)
+            }
+            self.incompatibility = incompatibility
+            appendAgentMessage(
+                incompatibility.message,
+                replyToMessageID: replyToMessageID,
+                artifacts: consumePendingArtifacts(),
+                artifactWarnings: consumePendingArtifactWarnings()
+            )
 
         case .error(let message):
             pendingUsage = nil
@@ -613,10 +640,20 @@ extension ChatViewModel {
     var confirmedExecutionMode: AgentExecutionMode {
         service.confirmedExecutionMode
     }
-
+    /// Pending until mode_changed arrives. When idle the request rides the next INPUT
     var isExecutionModeChangePending: Bool {
-        service.isAgentRequestActive
-            && service.desiredExecutionMode != service.confirmedExecutionMode
+        service.desiredExecutionMode != service.confirmedExecutionMode
+    }
+
+    /// Accept (full-access) only when the host lists it; the host rejects it with -32602 otherwise
+    var offeredExecutionModes: [AgentExecutionMode] {
+        AgentExecutionMode.allCases.filter {
+            $0 != .accept || service.availableExecutionModes.contains(.accept)
+        }
+    }
+
+    var acceptTurnsLeft: Int? {
+        service.confirmedExecutionMode == .accept ? service.acceptTurnsLeft : nil
     }
 
     var canChangeExecutionMode: Bool {
