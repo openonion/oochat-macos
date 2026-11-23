@@ -117,6 +117,40 @@ extension ChatViewTests {
     }
 
     @MainActor
+    func testComposerStatusFollowsTheChatsOwnConnection() {
+        let viewModel = makeViewModel()
+        let service = viewModel.service
+
+        XCTAssertEqual(viewModel.connectionStatus(), .notConnected)
+
+        service.isConnected = true
+        XCTAssertEqual(viewModel.connectionStatus(connectingFor: 9), .connecting)
+        XCTAssertEqual(viewModel.connectionStatus(connectingFor: 10), .unreachable(.noAnswer))
+
+        service.isHostedAgentStatusLive = true
+        XCTAssertEqual(viewModel.connectionStatus(), .live)
+        service.isAgentRequestActive = true
+        XCTAssertEqual(viewModel.connectionStatus(), .working)
+
+        service.isAgentRequestActive = false
+        service.isHostedAgentStatusLive = false
+        service.connectionError = "The agent closed the connection."
+        XCTAssertEqual(viewModel.connectionStatus(), .unreachable(.noAnswer))
+        XCTAssertTrue(viewModel.connectionStatus().canRetry)
+    }
+
+    @MainActor
+    func testALiveChatMarksItsAgentOnline() {
+        let viewModel = makeViewModel()
+        viewModel.appViewModel.connectedConfigurationIds.remove(viewModel.configuration.id)
+        XCTAssertFalse(viewModel.isConfigurationConnected)
+
+        viewModel.service.isHostedAgentStatusLive = true
+
+        XCTAssertTrue(viewModel.isConfigurationConnected)
+    }
+
+    @MainActor
     func makeViewModel(
         sessionID: UUID = UUID(),
         messages: [ChatMessage] = [],

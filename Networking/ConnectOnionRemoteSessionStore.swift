@@ -18,6 +18,9 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
     var executionState: ConnectOnionRemoteExecutionState = .idle
     var activeInputID: String?
     var inputWasSent = false
+    /// The text of the active INPUT. After a relaunch, a turn that finished while the app
+    /// was closed is accepted only if the host's last user message is this prompt.
+    var activePrompt: String?
     /// Survives view/service recreation so a cancelled run is never recovered.
     var wasInterrupted = false
     var desiredMode: AgentExecutionMode = .safe
@@ -30,6 +33,7 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
         case executionState
         case activeInputID
         case inputWasSent
+        case activePrompt
         case wasInterrupted
         case desiredMode
         case confirmedMode
@@ -50,6 +54,7 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
         ) ?? .idle
         activeInputID = try container.decodeIfPresent(String.self, forKey: .activeInputID)
         inputWasSent = try container.decodeIfPresent(Bool.self, forKey: .inputWasSent) ?? false
+        activePrompt = try container.decodeIfPresent(String.self, forKey: .activePrompt)
         wasInterrupted = try container.decodeIfPresent(Bool.self, forKey: .wasInterrupted) ?? false
         desiredMode = try container.decodeIfPresent(
             AgentExecutionMode.self,

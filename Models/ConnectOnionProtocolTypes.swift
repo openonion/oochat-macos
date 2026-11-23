@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// Connection status pushed to the UI while a request runs; `isLive` separates
@@ -11,31 +12,7 @@ nonisolated struct ConnectOnionTransportUpdate: Sendable {
 /// Schemaless JSON tree used wherever the protocol carries free-form payloads
 /// such as tool arguments and relay metadata. Bridging from Foundation
 /// collapses unrecognized values to `.null` rather than throwing.
-nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: ConnectOnionJSONValue])
-    case array([ConnectOnionJSONValue])
-    case null
-
-    init(any value: Any) {
-        switch value {
-        case let value as String:
-            self = .string(value)
-        case let value as Bool:
-            self = .bool(value)
-        case let value as NSNumber:
-            self = .number(value.doubleValue)
-        case let value as [String: Any]:
-            self = .object(value.mapValues(Self.init(any:)))
-        case let value as [Any]:
-            self = .array(value.map(Self.init(any:)))
-        default:
-            self = .null
-        }
-    }
-
+nonisolated extension JSONValue {
     var displayText: String {
         guard let data = try? JSONEncoder().encode(self),
               let object = try? JSONSerialization.jsonObject(with: data),
@@ -48,46 +25,6 @@ nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
         }
         return String(data: prettyData, encoding: .utf8) ?? "null"
     }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([String: Self].self) {
-            self = .object(value)
-        } else if let value = try? container.decode([Self].self) {
-            self = .array(value)
-        } else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unsupported JSON value"
-            )
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
 }
 
 /// A decoded `approval_needed` prompt: the tool call awaiting consent plus
@@ -95,13 +32,13 @@ nonisolated enum ConnectOnionJSONValue: Codable, Hashable, Sendable {
 nonisolated struct ConnectOnionApprovalRequest: Identifiable, Hashable, Sendable {
     let id: String
     let tool: String
-    let arguments: ConnectOnionJSONValue
+    let arguments: JSONValue
     let description: String?
-    let batchRemaining: [ConnectOnionJSONValue]
+    let batchRemaining: [JSONValue]
 }
 
-/// Keyword heuristics that rank and explain a pending tool call so the
-/// approval sheet stays useful even for tools the client has never seen.
+/// Keyword heuristics that rank a pending tool call and pick out its target and command.
+/// The one-sentence summary lives in the Kit (`OOApprovalDisclosure.summary`).
 extension ConnectOnionApprovalRequest {
     var riskLevel: ApprovalRiskLevel {
         let normalized = tool.lowercased()
@@ -134,49 +71,6 @@ extension ConnectOnionApprovalRequest {
         return nil
     }
 
-    var plainEnglishExplanation: String {
-        let normalized = tool.lowercased()
-        let target = targetSummary.map(Self.shortTarget)
-
-        if ["delete", "remove", "unlink"].contains(where: normalized.contains) {
-            return target.map { "Delete \($0)." }
-                ?? "Delete the selected item."
-        }
-        if normalized.contains("write") {
-            return target.map {
-                "Create or replace \($0) with the content supplied by the agent."
-            } ?? "Write content to a file."
-        }
-        if ["edit", "update", "patch"].contains(where: normalized.contains) {
-            return target.map { "Modify \($0) using the agent’s proposed changes." }
-                ?? "Modify an existing file or resource."
-        }
-        if normalized.contains("create") {
-            return target.map { "Create \($0)." }
-                ?? "Create a new file or resource."
-        }
-        if ["move", "rename"].contains(where: normalized.contains) {
-            return target.map { "Move or rename \($0)." }
-                ?? "Move or rename a file or resource."
-        }
-        if ["shell", "command", "execute", "bash"].contains(where: normalized.contains),
-           let command = commandText {
-            return Self.explain(command: command)
-        }
-        if ["send", "reply"].contains(where: normalized.contains) {
-            return target.map { "Send information to \($0)." }
-                ?? "Send information to an external recipient."
-        }
-        if normalized.contains("upload") {
-            return target.map { "Upload a file to \($0)." }
-                ?? "Upload a file to an external service."
-        }
-        if normalized.contains("click") {
-            return "Interact with the currently open webpage."
-        }
-        return "Allow the agent to run \(tool)."
-    }
-
     var commandText: String? {
         guard case .object(let values) = arguments else { return nil }
         for key in ["command", "cmd", "script"] {
@@ -185,44 +79,6 @@ extension ConnectOnionApprovalRequest {
             }
         }
         return nil
-    }
-
-    private static func shortTarget(_ value: String) -> String {
-        let lastComponent = URL(fileURLWithPath: value).lastPathComponent
-        return lastComponent.isEmpty ? value : lastComponent
-    }
-
-    private static func explain(command: String) -> String {
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard let executable = words.first else {
-            return "Run a shell command."
-        }
-
-        switch executable {
-        case "rm":
-            return "Delete the files or folders named by this command."
-        case "mkdir":
-            return "Create one or more folders."
-        case "touch":
-            return "Create an empty file or update its modified time."
-        case "cp":
-            return "Copy files or folders to another location."
-        case "mv":
-            return "Move or rename files or folders."
-        case "git":
-            let action = words.dropFirst().first ?? "operation"
-            return "Run a Git \(action) operation in the repository."
-        case "npm", "pnpm", "yarn":
-            let action = words.dropFirst().first ?? "command"
-            return "Run the \(action) task with \(executable)."
-        case "python", "python3":
-            return "Run a Python program or script."
-        case "swift":
-            return "Run a Swift command or program."
-        default:
-            return "Run a shell command using \(executable)."
-        }
     }
 }
 
@@ -263,19 +119,37 @@ nonisolated enum AgentExecutionMode: String, Codable, CaseIterable, Hashable, Se
 
     static let acceptTurns = 10
 
+    /// The host's mode matching the execution mode. Safe maps to auto (agent asks before tool use),
+    /// Plan to read-only, Accept to full-access (run without asking for set turns)
+    var permissionMode: OIPPermissionMode {
+        switch self {
+        case .safe: return .auto
+        case .plan: return .readOnly
+        case .accept: return .fullAccess
+        }
+    }
+
+    // Convert host mode to corresponding app mode (reverse conversion)
+    init?(permissionMode: OIPPermissionMode) {
+        guard let mode = Self.allCases.first(where: { $0.permissionMode == permissionMode }) else {
+            return nil
+        }
+        self = mode
+    }
+
     var displayName: String {
         switch self {
-        case .safe: return "safe"
-        case .plan: return "plan"
-        case .accept: return "accept"
+        case .safe: return "Auto"
+        case .plan: return "Read only"
+        case .accept: return "Full access"
         }
     }
 
     var helpText: String {
         switch self {
-        case .safe: return "Dangerous tools require approval"
-        case .plan: return "Read-only exploration followed by a plan review"
-        case .accept: return "Skip all tool approvals for up to 10 turns"
+        case .safe: return "Review each action and approve safe work automatically."
+        case .plan: return "Ask before any change."
+        case .accept: return "Bypass approval for the bounded user-driven turns shown."
         }
     }
 
@@ -289,9 +163,9 @@ nonisolated enum AgentExecutionMode: String, Codable, CaseIterable, Hashable, Se
 
     var confirmationText: String {
         switch self {
-        case .safe: return "Safe mode enabled"
-        case .plan: return "Plan mode enabled"
-        case .accept: return "Accept enabled for up to 10 turns"
+        case .safe: return "Auto enabled"
+        case .plan: return "Read only enabled"
+        case .accept: return "Full access enabled"
         }
     }
 }
@@ -392,6 +266,7 @@ nonisolated enum ConnectOnionPendingInteraction: Hashable, Sendable {
 nonisolated enum ConnectOnionTransportEvent: Sendable {
     case output(String)
     case usage(ChatUsageSummary)
+    case agentProfile(OIPAgentProfile)
     case executionItem(ExecutionItem)
     case agentImage(String)
     case agentArtifact(GeneratedArtifactPayload)
@@ -401,11 +276,57 @@ nonisolated enum ConnectOnionTransportEvent: Sendable {
     case approvalRequired(ConnectOnionApprovalRequest)
     case onboardingRequired(ConnectOnionOnboardingRequest)
     case onboardingSucceeded(String)
-    case modeChanged(AgentExecutionMode)
+    case modeChanged(AgentExecutionMode, turnsLeft: Int? = nil)
+    case sessionModes(available: [AgentExecutionMode], current: AgentExecutionMode?, turnsLeft: Int?)
     case planReviewRequired(ConnectOnionPlanReviewRequest)
     case ulwCheckpointRequired(ConnectOnionULWCheckpointRequest)
     case recoveryState(String)
     /// The hosted agent reached a cancellation boundary and stopped the run.
     case interrupted
     case error(String)
+    /// The host refused the protocol version (-32010). Show the Incompatible screen, do not retry.
+    case incompatible(OIPHandshake.Incompatibility)
+    /// The newest DASHBOARD_SNAPSHOT
+    case dashboard(OIPDashboard)
+    /// A decoded frame for the conversation's Work Room store (provider_invocation, provider_activity, provider_message).
+    case workRoomFrame(OIPServerFrame)
+    /// The handshake's CONNECTED, which rebuilds the Work Rooms from the host's chat items.
+    case workRoomSnapshot(OIPConnected)
+    /// The turn socket is open: the frame builder and a signed send over it, for Work Room decisions.
+    /// `send` returns false when the frame could not be written.
+    case workRoomTransport(frames: OIPClientFrames, send: @Sendable ([String: JSONValue]) async -> Bool)
+    /// A Claude Station refused the turn's outer INPUT (`provider_station_only`). Not a chat failure.
+    case stationRefusedChat
+    /// The socket closed or failed; Work Rooms keep what they show.
+    case workRoomConnectionDropped
+}
+
+extension ConnectOnionTransportEvent {
+    /// Feeds the Work Room store rather than the transcript.
+    var isWorkRoomEvent: Bool {
+        switch self {
+        case .workRoomFrame, .workRoomSnapshot, .workRoomTransport, .workRoomConnectionDropped: true
+        default: false
+        }
+    }
+}
+
+extension ConnectOnionRemoteError {
+    /// Transport events carry only an error's text, so match it back to the error it came from
+    /// and give it the plain words both apps share.
+    static func chatFailure(forDescription text: String) -> ChatFailure {
+        let known: [(ConnectOnionRemoteError, ChatFailure)] = [
+            (.agentOffline, .agentOffline),
+            (.agentNotFound, .agentNotFound),
+            (.connectionClosed, .connectionClosed),
+            (.timedOut, .timedOut),
+            (.requestInProgress, .busy),
+            (.recoveryUnavailable, .notRecovered)
+        ]
+        for (error, failure) in known where error.errorDescription == text {
+            return failure
+        }
+        // What the host itself said, such as "Agent not connected: 0x…".
+        return .server(text)
+    }
 }

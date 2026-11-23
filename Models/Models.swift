@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// How a saved configuration reaches its agent. Only `byAddress` is live; the
@@ -18,12 +19,28 @@ nonisolated struct GeneralAgentConfiguration: Identifiable, Codable, Hashable {
     var addressConfiguration: AgentAddressConfiguration?
     var avatarTextColorHex: String?
     var avatarBackgroundColorHex: String?
+    /// Set once the host's profile says this agent is a Claude Station, so its row can show it before the next connect.
+    var isClaudeStation = false
 
     /// Stable identity: normalized 0x address or Direct URL. Used to keep
     /// sessions attached to the same agent even if its local UUID changes.
     var agentIdentity: String? {
         guard let raw = addressConfiguration?.agentAddress else { return nil }
         return ConnectOnionAgentTarget.normalized(raw)
+    }
+}
+
+extension GeneralAgentConfiguration {
+    /// Configurations saved before `isClaudeStation` existed have no such key.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        connectionType = try container.decode(AgentConnectionType.self, forKey: .connectionType)
+        addressConfiguration = try container.decodeIfPresent(AgentAddressConfiguration.self, forKey: .addressConfiguration)
+        avatarTextColorHex = try container.decodeIfPresent(String.self, forKey: .avatarTextColorHex)
+        avatarBackgroundColorHex = try container.decodeIfPresent(String.self, forKey: .avatarBackgroundColorHex)
+        isClaudeStation = try container.decodeIfPresent(Bool.self, forKey: .isClaudeStation) ?? false
     }
 }
 
@@ -291,58 +308,6 @@ nonisolated enum EvalStatus: String, Codable, Hashable, Sendable {
     case done
 }
 
-/// A schema-free JSON value, used for tool arguments whose shape depends on
-/// the tool. Decoding probes concrete types in order and fails rather than
-/// silently dropping an unsupported value.
-nonisolated enum JSONValue: Codable, Hashable, Sendable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-        } else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unsupported JSON value"
-            )
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
-}
-
 extension ExecutionItem {
     func mergingDisplayFields(from previous: ExecutionItem) -> ExecutionItem {
         switch (self, previous) {
@@ -598,6 +563,16 @@ extension ToolCallExecutionItem {
             }
         }
         return nil
+    }
+    /// Finished and, for shell tools, exited 0. `statusLabel` treats a missing
+    /// "Exit code:" line as 0, so this matches what the row already displays.
+    var isCleanlyFinished: Bool {
+        status == .done && (shellExitCode ?? 0) == 0
+    }
+
+    /// Finished but not cleanly: an error status or a non-zero exit code.
+    var needsAttention: Bool {
+        status != .running && !isCleanlyFinished
     }
 
     private var fileArgument: String? {

@@ -1,21 +1,36 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ExecutionFlowView: View {
     let run: ExecutionRun
     let messageFontSize: CGFloat
     let conversationWidth: CGFloat
+    let workRooms: WorkRoomStore
+    let onOpenWorkRoom: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if run.isDirectAnswerTrace && run.status == .running {
                 DirectAnswerProgressRow(startedAt: run.startedAt)
             } else {
-                ForEach(visibleItems) { item in
-                    ExecutionItemRow(
-                        item: item,
-                        messageFontSize: messageFontSize,
-                        completionSummary: completionSummary(for: item)
-                    )
+                ForEach(traceEntries) { entry in
+                    switch entry {
+                    case .item(let item):
+                        ExecutionItemRow(
+                            item: item,
+                            messageFontSize: messageFontSize,
+                            completionSummary: completionSummary(for: item),
+                            isExpanded: startsExpanded(item)
+                        )
+                    case .workRoom(let workRoom):
+                        OOWorkRoomCard(
+                            workRoom: workRoom,
+                            onOpen: { onOpenWorkRoom(workRoom.id) },
+                            onDecide: { workRooms.decide($0, in: workRoom.id) }
+                        )
+                    case .finishedSteps(_, let steps):
+                        FinishedStepsGroupRow(steps: steps, messageFontSize: messageFontSize)
+                    }
                 }
             }
         }
@@ -24,8 +39,14 @@ struct ExecutionFlowView: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    private var visibleItems: [ExecutionItem] {
-        ChatViewPresentation.collapsedTraceItems(run.items)
+    private var traceEntries: [ChatTraceEntry] {
+            ChatViewPresentation.traceEntries(run.items, workRooms: workRooms)
+    }
+
+    /// Failed tool calls open by default so the error is on screen.
+    private func startsExpanded(_ item: ExecutionItem) -> Bool {
+        if case .toolCall(let call) = item { return call.needsAttention }
+        return false
     }
 
     private func completionSummary(for item: ExecutionItem) -> String? {

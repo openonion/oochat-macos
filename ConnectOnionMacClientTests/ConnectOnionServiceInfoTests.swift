@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Combine
 import CryptoKit
 import XCTest
@@ -119,37 +120,6 @@ extension ConnectOnionServiceTests {
         )
     }
 
-    func testHostedInputMessageIncludesFilesAtProtocolTopLevel() throws {
-        let identity = try ConnectOnionIdentity(
-            rawPrivateKey: Data((0..<32).map(UInt8.init))
-        )
-        let endpoint = ConnectOnionResolvedEndpoint(
-            agentAddress: "0x" + String(repeating: "ab", count: 32),
-            webSocketURL: URL(string: "wss://agent.example/ws")!,
-            httpBaseURL: URL(string: "https://agent.example")!,
-            isDirect: true,
-            info: nil
-        )
-        let file = ConnectOnionInputFile(
-            name: "notes.txt",
-            mimeType: "text/plain",
-            data: Data("hello".utf8)
-        )
-
-        let message = try ConnectOnionRemoteAgentClient.buildInputMessage(
-            prompt: "Summarize this file",
-            files: [file],
-            inputID: "input-1",
-            identity: identity,
-            endpoint: endpoint
-        )
-
-        XCTAssertEqual(message["type"] as? String, "INPUT")
-        XCTAssertEqual(message["prompt"] as? String, "Summarize this file")
-        let files = try XCTUnwrap(message["files"] as? [[String: String]])
-        XCTAssertEqual(files, [file.protocolObject])
-    }
-
     func testApprovalDecisionPayloadsMatchHostedProtocol() {
         assertApprovalMessage(
             ConnectOnionApprovalDecision.approveOnce.message,
@@ -173,19 +143,15 @@ extension ConnectOnionServiceTests {
         XCTAssertEqual(hard["feedback"] as? String, "Stop")
     }
 
-    func testExecutionModePayloadsMatchHostedProtocol() {
-        let safe = ConnectOnionRemoteAgentClient.buildModeChangeMessage(.safe)
-        XCTAssertEqual(safe["type"] as? String, "mode_change")
-        XCTAssertEqual(safe["mode"] as? String, "safe")
-        XCTAssertNil(safe["turns"])
-
-        let plan = ConnectOnionRemoteAgentClient.buildModeChangeMessage(.plan)
-        XCTAssertEqual(plan["mode"] as? String, "plan")
-
-        let accept = ConnectOnionRemoteAgentClient.buildModeChangeMessage(.accept)
-        XCTAssertEqual(accept["mode"] as? String, "ulw")
-        XCTAssertEqual(accept["turns"] as? Int, 10)
-        XCTAssertEqual(AgentExecutionMode.accept.displayName, "accept")
+    func testExecutionModesMapToTheHostsCanonicalModes() {
+        XCTAssertEqual(AgentExecutionMode.safe.permissionMode, .auto)
+        XCTAssertEqual(AgentExecutionMode.plan.permissionMode, .readOnly)
+        XCTAssertEqual(AgentExecutionMode.accept.permissionMode, .fullAccess)
+        for mode in AgentExecutionMode.allCases {
+            XCTAssertEqual(AgentExecutionMode(permissionMode: mode.permissionMode), mode)
+        }
+        XCTAssertNil(AgentExecutionMode(permissionMode: .unknown("other")))
+        XCTAssertEqual(AgentExecutionMode.accept.displayName, "Full access")
     }
 
     func testExecutionRunShowsModelAndSynthesisForDirectAnswers() {
@@ -236,7 +202,7 @@ extension ConnectOnionServiceTests {
     }
 
     func testJSONValueRoundTripsNestedProtocolArguments() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "path": "README.md",
                 "overwrite": true,
@@ -245,7 +211,7 @@ extension ConnectOnionServiceTests {
         )
 
         let encoded = try JSONEncoder().encode(value)
-        let decoded = try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded)
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: encoded)
 
         XCTAssertEqual(decoded, value)
         XCTAssertTrue(value.displayText.contains("README.md"))
@@ -408,5 +374,4 @@ extension ConnectOnionServiceTests {
         )
         XCTAssertTrue(publicKey.isValidSignature(swiftSignature, for: canonical))
     }
-
 }
