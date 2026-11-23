@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 
@@ -1254,11 +1255,11 @@ extension ConnectOnionRemoteAgentClient {
         from event: [String: Any]
     ) -> ConnectOnionApprovalRequest {
         let batch = (event["batch_remaining"] as? [Any] ?? [])
-            .map(ConnectOnionJSONValue.init(any:))
+            .map(JSONValue.init(any:))
         return ConnectOnionApprovalRequest(
             id: (event["id"] as? String) ?? UUID().uuidString,
             tool: (event["tool"] as? String) ?? "unknown",
-            arguments: ConnectOnionJSONValue(any: event["arguments"] ?? [:]),
+            arguments: JSONValue(any: event["arguments"] ?? [:]),
             description: event["description"] as? String,
             batchRemaining: batch
         )
@@ -1316,7 +1317,8 @@ extension ConnectOnionRemoteAgentClient {
             "timestamp": timestamp,
             "payload": payload,
             "from": identity.address,
-            "signature": try identity.signature(for: payload)
+            "signature": try identity.signature(for: payload),
+            "protocol": OIP.descriptor.mapValues { $0.anyValue }
         ]
 
         if !endpoint.isDirect {
@@ -1435,6 +1437,7 @@ extension ConnectOnionRemoteAgentClient {
         sessionStore.save(sessionState)
     }
 
+    // JSONSerialisation here is fine, as it is not signed
     private func sendJSON(
         _ object: [String: Any],
         over task: any ConnectOnionWebSocketTasking

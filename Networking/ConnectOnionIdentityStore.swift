@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 
@@ -109,7 +110,7 @@ nonisolated struct ConnectOnionIdentity {
     }
 
     var address: String {
-        "0x" + privateKey.publicKey.rawRepresentation.hexString
+        "0x" + Hex.encode(privateKey.publicKey.rawRepresentation)
     }
 
     var rawPrivateKey: Data {
@@ -117,21 +118,11 @@ nonisolated struct ConnectOnionIdentity {
     }
 
     func canonicalJSON(for payload: [String: Any]) throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.sortedKeys]
-        )
+        CanonicalJSON.data(from: payload.mapValues { JSONValue(any: $0) })
     }
 
     func signature(for payload: [String: Any]) throws -> String {
         let canonical = try canonicalJSON(for: payload)
-        return try privateKey.signature(for: canonical).hexString
-    }
-}
-
-/// Lowercase hex, the encoding the protocol uses for addresses and signatures.
-nonisolated private extension Data {
-    var hexString: String {
-        map { String(format: "%02x", $0) }.joined()
+        return Hex.encode(try privateKey.signature(for: canonical))
     }
 }
