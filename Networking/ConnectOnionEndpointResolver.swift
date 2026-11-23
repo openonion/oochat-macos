@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// Where a configured target actually resolved: a verified direct `/ws`
@@ -100,7 +101,7 @@ nonisolated struct ConnectOnionFileInputCapabilities:
 nonisolated struct ConnectOnionRelayAgentInfo: Decodable {
     let online: Bool?
     let endpoints: [String]
-    let relay: ConnectOnionJSONValue?
+    let relay: JSONValue?
     let lastSeen: String?
 
     var isReachable: Bool {

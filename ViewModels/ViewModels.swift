@@ -775,7 +775,6 @@ class AppViewModel: ObservableObject {
                 didChangeMessages = true
             }
         }
-
         if didChangeSessions {
             sessions = updatedSessions.sorted { $0.updatedAt > $1.updatedAt }
         }
