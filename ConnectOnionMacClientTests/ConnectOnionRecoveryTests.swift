@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import XCTest
+import ConnectOnionKit
+
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionRemoteAgentTests {
@@ -254,10 +256,12 @@ extension ConnectOnionRemoteAgentTests {
         let key = try Curve25519.Signing.PrivateKey(
             rawRepresentation: privateKeyData
         )
-        let canonicalPayload = try JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.sortedKeys]
-        )
+        // let canonicalPayload = try JSONSerialization.data(
+        //     withJSONObject: payload,
+        //     options: [.sortedKeys]
+        // )
+
+        let canonicalPayload = CanonicalJSON.data(from: payload.mapValues { JSONValue(any: $0) })
         XCTAssertTrue(
             key.publicKey.isValidSignature(signature, for: canonicalPayload),
             file: file,

@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 
@@ -90,7 +91,7 @@ actor ConnectOnionRemoteAgentClient {
         sessionState.desiredMode = mode
 
         if isSending, let task = webSocketTask {
-            try await sendJSON(Self.buildModeChangeMessage(mode), over: task)
+            try await sendCommand(Self.buildModeChangeMessage(mode), over: task)
         } else {
             storeClientModeRequest(mode)
         }
@@ -181,7 +182,7 @@ actor ConnectOnionRemoteAgentClient {
         sessionState.wasInterrupted = true
         sessionStore.save(sessionState)
         if canSendControlMessages, let task = webSocketTask {
-            try await sendJSON(
+            try await sendCommand(
                 Self.buildInterruptMessage(inputID: sessionState.activeInputID),
                 over: task
             )
@@ -196,15 +197,15 @@ actor ConnectOnionRemoteAgentClient {
         task: any ConnectOnionWebSocketTasking,
         endpoint: ConnectOnionResolvedEndpoint
     ) async throws {
-        let identity = try identityStore.loadOrCreateIdentity()
         pendingRuntimeMessageIDs.append(localMessageID)
         do {
+            // no sendCommand; buildInputMessage already returns a signed frame.
             try await sendJSON(
                 Self.buildInputMessage(
                     prompt: prompt,
                     files: files,
                     inputID: UUID().uuidString,
-                    identity: identity,
+                    signer: OIPSigner(keyStore: identityStore),
                     endpoint: endpoint
                 ),
                 over: task
@@ -219,7 +220,7 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(
+        try await sendCommand(
             ["type": "ASK_USER_RESPONSE", "answer": answer],
             over: task
         )
@@ -231,7 +232,10 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        try await sendCommand(
+            ["type": "APPROVAL_RESPONSE"].merging(decision.message) { $1 },
+            over: task
+        )
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -240,7 +244,7 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        try await sendCommand(decision.message, over: task)
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -251,7 +255,10 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        try await sendCommand(
+            ["type": "ULW_RESPONSE"].merging(decision.message) { $1 },
+            over: task
+        )
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -439,10 +446,7 @@ extension ConnectOnionRemoteAgentClient {
         task.resume()
 
         try await sendJSON(
-            buildConnectMessage(
-                identity: request.identity,
-                endpoint: request.endpoint
-            ),
+            buildConnectMessage(endpoint: request.endpoint),
             over: task
         )
         let connectedStatus = try await waitForConnected(
@@ -465,12 +469,13 @@ extension ConnectOnionRemoteAgentClient {
             sessionState.inputWasSent = true
             sessionState.executionState = .running
             sessionStore.save(sessionState)
+            // no sendCommand; buildInputMessage already returns a signed frame.
             try await sendJSON(
                 Self.buildInputMessage(
                     prompt: prompt,
                     files: request.files,
                     inputID: request.inputID,
-                    identity: request.identity,
+                    signer: OIPSigner(keyStore: identityStore),
                     endpoint: request.endpoint
                 ),
                 over: task
@@ -486,7 +491,7 @@ extension ConnectOnionRemoteAgentClient {
     ) async throws {
         canSendControlMessages = true
         if interruptRequested {
-            try await sendJSON(
+            try await sendCommand(
                 Self.buildInterruptMessage(inputID: sessionState.activeInputID),
                 over: task
             )
@@ -1254,11 +1259,11 @@ extension ConnectOnionRemoteAgentClient {
         from event: [String: Any]
     ) -> ConnectOnionApprovalRequest {
         let batch = (event["batch_remaining"] as? [Any] ?? [])
-            .map(ConnectOnionJSONValue.init(any:))
+            .map(JSONValue.init(any:))
         return ConnectOnionApprovalRequest(
             id: (event["id"] as? String) ?? UUID().uuidString,
             tool: (event["tool"] as? String) ?? "unknown",
-            arguments: ConnectOnionJSONValue(any: event["arguments"] ?? [:]),
+            arguments: JSONValue(any: event["arguments"] ?? [:]),
             description: event["description"] as? String,
             batchRemaining: batch
         )
@@ -1302,22 +1307,16 @@ extension ConnectOnionRemoteAgentClient {
     }
 
     private func buildConnectMessage(
-        identity: ConnectOnionIdentity,
         endpoint: ConnectOnionResolvedEndpoint
     ) throws -> [String: Any] {
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let payload: [String: Any] = [
-            "timestamp": timestamp,
-            "to": endpoint.agentAddress
-        ]
+        // Signs {to, timestamp, nonce, signed_commands: 1}.
+        // The last field turns on the per-command signature check for this connection.
+        let signer = OIPSigner(keyStore: identityStore)
+        var message = try signer
+            .envelope(type: "CONNECT", payload: signer.connectPayload(to: endpoint.agentAddress))
+            .mapValues { $0.anyValue }
 
-        var message: [String: Any] = [
-            "type": "CONNECT",
-            "timestamp": timestamp,
-            "payload": payload,
-            "from": identity.address,
-            "signature": try identity.signature(for: payload)
-        ]
+        message["protocol"] = OIP.descriptor.mapValues { $0.anyValue }
 
         if !endpoint.isDirect {
             message["to"] = endpoint.agentAddress
@@ -1339,34 +1338,19 @@ extension ConnectOnionRemoteAgentClient {
         prompt: String,
         files: [ConnectOnionInputFile],
         inputID: String,
-        identity: ConnectOnionIdentity,
+        signer: OIPSigner,
         endpoint: ConnectOnionResolvedEndpoint
     ) throws -> [String: Any] {
-        let timestamp = Int(Date().timeIntervalSince1970)
-        var payload: [String: Any] = [
-            "prompt": prompt,
-            "timestamp": timestamp
-        ]
-
-        var message: [String: Any] = [
-            "type": "INPUT",
-            "input_id": inputID,
-            "prompt": prompt,
-            "timestamp": timestamp
+        // Everything the host acts on must be inside the signed payload, rest is discarded
+        var fields: [String: JSONValue] = [
+            "input_id": .string(inputID),
+            "prompt": .string(prompt)
         ]
         if !files.isEmpty {
-            message["files"] = files.map(\.protocolObject)
+            fields["files"] = JSONValue(any: files.map(\.protocolObject))
         }
-
-        if !endpoint.isDirect {
-            payload["to"] = endpoint.agentAddress
-            message["to"] = endpoint.agentAddress
-        }
-
-        message["payload"] = payload
-        message["from"] = identity.address
-        message["signature"] = try identity.signature(for: payload)
-        return message
+        return try signer.command(type: "INPUT", fields: fields, to: endpoint.agentAddress)
+            .mapValues { $0.anyValue }
     }
 
     nonisolated static func buildModeChangeMessage(
@@ -1435,6 +1419,46 @@ extension ConnectOnionRemoteAgentClient {
         sessionStore.save(sessionState)
     }
 
+    /// Turns an unsigned command dictionary into a signed one.
+    /// PONG and ONBOARD_SUBMIT are exempt and stay on sendJSON.
+    nonisolated static func signedCommand(
+        _ object: [String: Any],
+        signer: OIPSigner,
+        to recipient: String
+    ) throws -> [String: Any] {
+        // The command name must be inside the signed payload, so a missing type is an error.
+        guard let type = object["type"] as? String else {
+            throw ConnectOnionRemoteError.invalidProtocolMessage
+        }
+        var fields = object.mapValues { JSONValue(any: $0) }
+        // The signer owns these keys and throws if fields set them, drop any copies first.
+        for reserved in ["type", "to", "timestamp", "nonce"] {
+            fields[reserved] = nil
+        }
+        return try signer.command(type: type, fields: fields, to: recipient)
+            .mapValues { $0.anyValue }
+    }
+
+    /// Signs a command, then sends it. Every frame after CONNECT goes through here except
+    /// INPUT (signed by its builder), PONG and ONBOARD_SUBMIT.
+    /// Once CONNECT declares signed_commands, the host rejects any other unsigned frame.
+    private func sendCommand(
+        _ object: [String: Any],
+        over task: any ConnectOnionWebSocketTasking
+    ) async throws {
+        guard let endpoint else {
+            throw ConnectOnionRemoteError.connectionClosed
+        }
+
+        let frame = try Self.signedCommand(
+            object,
+            signer: OIPSigner(keyStore: identityStore),
+            to: endpoint.agentAddress
+        )
+        try await sendJSON(frame, over: task)
+    }
+
+    // JSONSerialisation here is fine, as it is not signed
     private func sendJSON(
         _ object: [String: Any],
         over task: any ConnectOnionWebSocketTasking

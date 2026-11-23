@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import XCTest
+import ConnectOnionKit
+
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionRemoteAgentTests {
@@ -66,6 +68,7 @@ extension ConnectOnionRemoteAgentTests {
     func testInputMessagesSignDirectAndRelayPayloadsAndIncludeFiles() throws {
         let privateKeyData = Data((0..<32).map(UInt8.init))
         let identity = try ConnectOnionIdentity(rawPrivateKey: privateKeyData)
+        let signer = OIPSigner(keyStore: InMemoryPrivateKeyStore(rawKey: privateKeyData))
         let address = makeAddress("78")
         let direct = ConnectOnionResolvedEndpoint(
             agentAddress: address,
@@ -91,10 +94,14 @@ extension ConnectOnionRemoteAgentTests {
             prompt: "Summarize",
             files: [file],
             inputID: "input-direct",
-            identity: identity,
+            // identity: identity,
+            signer: signer,
             endpoint: direct
         )
-        XCTAssertNil(directMessage["to"])
+        // XCTAssertNil(directMessage["to"])
+
+        // always signed now, direct or relay
+        XCTAssertEqual(directMessage["to"] as? String, address)
         XCTAssertEqual(directMessage["from"] as? String, identity.address)
         XCTAssertEqual(
             directMessage["files"] as? [[String: String]],
@@ -109,7 +116,8 @@ extension ConnectOnionRemoteAgentTests {
             prompt: "Continue",
             files: [],
             inputID: "input-relay",
-            identity: identity,
+            // identity: identity,
+            signer: signer,
             endpoint: relay
         )
         XCTAssertEqual(relayMessage["to"] as? String, address)

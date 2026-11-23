@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Combine
 import CryptoKit
 import XCTest
@@ -140,7 +141,8 @@ extension ConnectOnionServiceTests {
             prompt: "Summarize this file",
             files: [file],
             inputID: "input-1",
-            identity: identity,
+            // identity: identity,
+            signer: OIPSigner(keyStore: InMemoryPrivateKeyStore(rawKey: identity.rawPrivateKey)),
             endpoint: endpoint
         )
 
@@ -236,7 +238,7 @@ extension ConnectOnionServiceTests {
     }
 
     func testJSONValueRoundTripsNestedProtocolArguments() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "path": "README.md",
                 "overwrite": true,
@@ -245,7 +247,7 @@ extension ConnectOnionServiceTests {
         )
 
         let encoded = try JSONEncoder().encode(value)
-        let decoded = try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded)
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: encoded)
 
         XCTAssertEqual(decoded, value)
         XCTAssertTrue(value.displayText.contains("README.md"))
@@ -409,4 +411,39 @@ extension ConnectOnionServiceTests {
         XCTAssertTrue(publicKey.isValidSignature(swiftSignature, for: canonical))
     }
 
+    func testCommandsAreSignedAsV2WithTypeToNonceAndAVerifiableSignature() throws {
+        let privateKeyData = Data((0..<32).map(UInt8.init))
+        let signer = OIPSigner(keyStore: InMemoryPrivateKeyStore(rawKey: privateKeyData))
+        let agent = "0x" + String(repeating: "ab", count: 32)
+
+        let frame = try ConnectOnionRemoteAgentClient.signedCommand(
+            ["type": "INTERRUPT", "requested_at_ms": 1_700_000_000_123, "input_id": "input-1"],
+            signer: signer,
+            to: agent
+        )
+
+        let payload = try XCTUnwrap(frame["payload"] as? [String: Any])
+        XCTAssertEqual(payload["type"] as? String, "INTERRUPT")
+        XCTAssertEqual(payload["to"] as? String, agent)
+        XCTAssertEqual(payload["input_id"] as? String, "input-1")
+        XCTAssertFalse((payload["nonce"] as? String ?? "").isEmpty)
+        XCTAssertEqual(payload["requested_at_ms"] as? Int, 1_700_000_000_123)
+        XCTAssertEqual(frame["input_id"] as? String, "input-1") // copy at the top level
+
+        let publicKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData).publicKey
+        let signature = try XCTUnwrap(Hex.decode(try XCTUnwrap(frame["signature"] as? String)))
+        let signed = payload.mapValues { JSONValue(any: $0) }
+        XCTAssertTrue(publicKey.isValidSignature(signature, for: CanonicalJSON.data(from: signed)))
+    }
+
+    func testCommandWithoutATypeIsRejected() {
+        let signer = OIPSigner(keyStore: InMemoryPrivateKeyStore())
+        XCTAssertThrowsError(
+            try ConnectOnionRemoteAgentClient.signedCommand(
+                ["approved": true],
+                signer: signer,
+                to: "0xagent"
+            )
+        )
+    }
 }

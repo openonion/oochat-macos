@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 import XCTest
@@ -30,7 +31,7 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
     }
 
     func testJSONValueConvertsEverySupportedFoundationShapeAndRoundTrips() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "string": "value",
                 "boolean": true,
@@ -56,11 +57,11 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
 
         let encoded = try JSONEncoder().encode(value)
         XCTAssertEqual(
-            try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded),
+            try JSONDecoder().decode(JSONValue.self, from: encoded),
             value
         )
         XCTAssertTrue(value.displayText.contains("\"boolean\" : true"))
-        XCTAssertEqual(ConnectOnionJSONValue(any: NSNull()), .null)
+        XCTAssertEqual(JSONValue(any: NSNull()), .null)
     }
 
     func testRelayReachabilityCoversExplicitAndInferredRoutes() throws {
@@ -166,7 +167,7 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
     func testApprovalRequestsExplainEverySupportedOperation() {
         func request(
             _ tool: String,
-            arguments: [String: ConnectOnionJSONValue] = [:]
+            arguments: [String: JSONValue] = [:]
         ) -> ConnectOnionApprovalRequest {
             ConnectOnionApprovalRequest(
                 id: UUID().uuidString,
