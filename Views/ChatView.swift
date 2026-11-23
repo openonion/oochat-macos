@@ -1,20 +1,31 @@
 import SwiftUI
 import AppKit
+import ConnectOnionKit
 
 /// Selects the messages, execution runs, and approvals visible in the chat.
 struct ChatView: View {
     @StateObject var viewModel: ChatViewModel
-    let conversationWidth: CGFloat
+    private let fullConversationWidth: CGFloat
     let historySelectionRevision: Int
 
     @AppStorage("chatFontSize") private var chatFontSize: Double = 15
+    @AppStorage("isControlCenterOpen") private var isControlCenterOpen = true
+    @AppStorage("controlCenterPaneWidth") private var paneWidth = Double(ControlCenterPaneWidth.initial)
+    @State private var dragStartWidth: Double?
+    @State private var detailWidth: CGFloat = 0
     @State private var keyMonitor: Any?
     @State private var isFileDropTargeted = false
     @FocusState private var isInputFocused: Bool
+    @State private var selectedSkillIndex = 0
+    @State private var isKeyboardNavigatingSkills = false
+    /// The Work Room shown in place of the chat, by id, so every render reads the live room.
+    @State private var openWorkRoomID: String?
 
     private let minChatFontSize: Double = 12
     private let maxChatFontSize: Double = 26
     private let chatFontStep: Double = 1
+    private let skillPaletteMaxHeight: CGFloat = 240
+    private let skillPaletteRowHeight: CGFloat = 44
 
     init(
         viewModel: ChatViewModel,
@@ -23,14 +34,142 @@ struct ChatView: View {
         isFileDropTargeted: Bool = false
     ) {
         _viewModel = StateObject(wrappedValue: viewModel)
-        self.conversationWidth = conversationWidth
+        self.fullConversationWidth = conversationWidth
         self.historySelectionRevision = historySelectionRevision
         _isFileDropTargeted = State(initialValue: isFileDropTargeted)
     }
 
     var body: some View {
+        if let openWorkRoomID, let workRoom = viewModel.workRooms.workRoom(id: openWorkRoomID) {
+            workRoomDetail(workRoom)
+        } else {
+            chatDetail
+        }
+    }
+
+    /// The Work Room takes the whole detail pane. The Control Center pane and its toggle are not
+    /// drawn here, and their saved state is not touched, so Back restores them exactly.
+    private func workRoomDetail(_ workRoom: WorkRoom) -> some View {
+        OOWorkRoomView(workRoom: workRoom)
+            .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        openWorkRoomID = nil
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .help("Back to the chat")
+                    .keyboardShortcut("[", modifiers: .command)
+                }
+            }
+            .toolbarBackground(AppPalette.toolbarSurface, for: .windowToolbar)
+            .toolbarBackground(.visible, for: .windowToolbar)
+    }
+
+    private var chatDetail: some View {
+        HStack(spacing: 0) {
+            chatColumn
+
+            if let dashboard = viewModel.dashboard, let shownWidth = shownPaneWidth {
+                paneResizeHandle
+                OOControlCenterPane(
+                    dashboard: dashboard,
+                    skills: viewModel.agentProfile?.skills,
+                    onRunSkill: viewModel.runControlCenterSkill,
+                    onCollapse: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isControlCenterOpen = false
+                    }
+                })
+                .frame(width: shownWidth)
+            }
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.onAppear { detailWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in detailWidth = width }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if viewModel.dashboard != nil {
+                    OOControlCenterButton(isOpen: isControlCenterOpen) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isControlCenterOpen.toggle()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The pane's width on screen: the saved width, cut down so the chat keeps `minimumChatWidth`.
+    /// nil when the pane is closed or no dashboard.
+    /// The saved width is left alone, so the pane comes back at its old size when the window grows.
+    private var shownPaneWidth: CGFloat? {
+        guard viewModel.dashboard != nil, isControlCenterOpen else { return nil }
+        guard detailWidth > 0 else { return CGFloat(ControlCenterPaneWidth.clamped(paneWidth)) }
+        return CGFloat(ControlCenterPaneWidth.fitted(paneWidth, in: Double(detailWidth)))
+    }
+
+    /// What the user sees, so a drag or an arrow key starts from the visible edge, not a hidden wider one.
+    private var currentPaneWidth: Double {
+        shownPaneWidth.map { Double($0) } ?? paneWidth
+    }
+
+    /// The reading column narrows by the pane's width, so the pane never covers the chat.
+    private var conversationWidth: CGFloat {
+        guard let pane = shownPaneWidth, detailWidth > 0 else {
+            return fullConversationWidth
+        }
+        let chatWidth = detailWidth - pane - ControlCenterPaneWidth.handleWidth
+        return min(fullConversationWidth, max(0, chatWidth - 48))
+    }
+
+    /// A one-point hairline with a wider grab area; drag, or use the arrow keys, to resize
+    /// (oo-chat use-pane-width.ts). The pane is on the right, so dragging left widens it.
+    private var paneResizeHandle: some View {
+        Rectangle()
+            .fill(OOColor.hairline)
+            .frame(width: 1)
+            .frame(width: ControlCenterPaneWidth.handleWidth)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let start = dragStartWidth ?? currentPaneWidth
+                    dragStartWidth = start
+                    paneWidth = ControlCenterPaneWidth.clamped(start - value.translation.width)
+                }
+                .onEnded { _ in dragStartWidth = nil }
+            )
+            .focusable()
+            .onKeyPress(.leftArrow) {
+                paneWidth = ControlCenterPaneWidth.clamped(currentPaneWidth + ControlCenterPaneWidth.keyStep)
+                return .handled
+            }
+            .onKeyPress(.rightArrow) {
+                paneWidth = ControlCenterPaneWidth.clamped(currentPaneWidth - ControlCenterPaneWidth.keyStep)
+                return .handled
+            }
+            .accessibilityElement()
+            .accessibilityLabel("Resize Control Center")
+            .accessibilityValue("\(Int(currentPaneWidth)) points")
+            .accessibilityAdjustableAction { direction in
+                let step = direction == .increment ? ControlCenterPaneWidth.keyStep : -ControlCenterPaneWidth.keyStep
+                paneWidth = ControlCenterPaneWidth.clamped(currentPaneWidth + step)
+            }
+
+    }
+
+    private var chatColumn: some View {
         ZStack {
-            AppBackground()
+            OOColor.surface
+                .ignoresSafeArea()
 
             chatBody
 
@@ -62,6 +201,22 @@ struct ChatView: View {
                 isFileDropTargeted = isTargeted
             }
         }
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.incompatibility != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        viewModel.incompatibility = nil
+                    }
+                }
+            )
+        ) {
+            if let incompatibility = viewModel.incompatibility {
+                IncompatibleAgentView(incompatibility: incompatibility) {
+                    viewModel.incompatibility = nil
+                }
+            }
+        }
         .navigationTitle("")
         .toolbarBackground(AppPalette.toolbarSurface, for: .windowToolbar)
         .toolbarBackground(.visible, for: .windowToolbar)
@@ -73,6 +228,170 @@ struct ChatView: View {
 
     private var pendingApproval: ConnectOnionApprovalRequest? {
         ChatViewPresentation.approvalRequest(from: viewModel.pendingInteraction)
+    }
+
+    private var skillPaletteQuery: String? {
+        let text = viewModel.inputText
+
+        guard text.hasPrefix("/") else { return nil }
+
+        let query = String(text.dropFirst())
+
+        // Only show the palette while entering the skill name, not after the user has started entering arguments.
+        guard !query.contains(where: \.isWhitespace) else {
+            return nil
+        }
+
+        return query
+    }
+
+    private var filteredSkills: [OIPAgentSkill] {
+        guard let skills = viewModel.agentProfile?.skills,
+              let query = skillPaletteQuery else {
+            return []
+        }
+
+        let rankedNames = SkillSearch.rank(
+            skills.map(\.name),
+            query: query
+        )
+
+        return rankedNames.compactMap { name in
+            skills.first { $0.name == name }
+        }
+    }
+
+    private var skillPalette: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if filteredSkills.isEmpty {
+                            Text(
+                                viewModel.agentProfile == nil
+                                    ? "Loading agent skills…"
+                                    : (viewModel.agentProfile?.skills.isEmpty == true
+                                        ? "This agent has no skills."
+                                        : "No matching skills.")
+                            )
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                        } else {
+                            ForEach(
+                                Array(filteredSkills.enumerated()),
+                                id: \.element.name
+                            ) { index, skill in
+                                Button {
+                                    viewModel.inputText = "/\(skill.name) "
+                                    isInputFocused = true
+                                } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                        Text("/\(skill.name)")
+                                            .font(.system(size: 14, weight: .semibold))
+                                            .foregroundStyle(OOColor.ink)
+                                            .fixedSize(horizontal: true, vertical: false)
+
+                                        if let description = skill.description,
+                                           !description.isEmpty {
+                                            Text(description)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(OOColor.inkSecondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.tail)
+                                        }
+
+                                        Spacer(minLength: 0)
+                                    }
+                                    .ooRow(isSelected: index == selectedSkillIndex)
+                                    .onHover { isHovering in
+                                        guard isHovering, !isKeyboardNavigatingSkills else { return }
+                                        selectedSkillIndex = index
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .id(skill.name)
+                            }
+                        }
+                    }
+                }
+                .frame(
+                    height: min(
+                        CGFloat(filteredSkills.count) * skillPaletteRowHeight,
+                        skillPaletteMaxHeight
+                    )
+                )
+                .onChange(of: selectedSkillIndex) { _, newIndex in
+                    guard filteredSkills.indices.contains(newIndex) else {
+                        return
+                    }
+
+                    withAnimation {
+                        proxy.scrollTo(
+                            filteredSkills[newIndex].name,
+                            anchor: .center
+                        )
+                    }
+                }
+                .onChange(of: filteredSkills.map(\.name)) { _, _ in
+                    proxy.scrollTo(
+                        filteredSkills.indices.contains(selectedSkillIndex)
+                            ? filteredSkills[selectedSkillIndex].name
+                            : filteredSkills.first?.name ?? "",
+                        anchor: .top
+                    )
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 5) {
+                Text("↑↓")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("navigate")
+                Text("·")
+
+                Text("Tab")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("complete")
+                Text("·")
+
+                Text("Esc")
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(AppPalette.surfaceMuted)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                Text("dismiss")
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .padding(5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            OOColor.paper,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(OOColor.hairline, lineWidth: 1)
+        }
+        .onContinuousHover { phase in
+            if case .active = phase {
+                isKeyboardNavigatingSkills = false
+            }
+        }
     }
 
     private func executionRuns(for message: ChatMessage) -> [ExecutionRun] {
@@ -88,13 +407,23 @@ struct ChatView: View {
 
     private var chatBody: some View {
         VStack(spacing: 0) {
+            AgentBalanceNotice(
+                balanceUSD: viewModel.agentProfile?.balanceUSD,
+                agentAddress: viewModel.agentProfile?.address
+                    ?? viewModel.configuration.addressConfiguration?.agentAddress
+            )
+
             if !hasStartedConversation {
                 WelcomeHomeView(
                     configuration: viewModel.configuration,
                     isConnected: viewModel.isConfigurationConnected,
-                    connectionSnapshot: viewModel.connectionSnapshot
+                    connectionSnapshot: viewModel.connectionSnapshot,
+                    agentProfile: viewModel.agentProfile,
+                    dashboard: viewModel.dashboard
                 ) { prompt in
+                    // Fill, don't send: the person can add arguments first.
                     viewModel.inputText = prompt
+                    isInputFocused = true
                 }
             } else {
             ScrollViewReader { proxy in
@@ -124,7 +453,9 @@ struct ChatView: View {
                                     ExecutionFlowView(
                                         run: run,
                                         messageFontSize: chatFontSize,
-                                        conversationWidth: conversationWidth
+                                        conversationWidth: conversationWidth,
+                                        workRooms: viewModel.workRooms,
+                                        onOpenWorkRoom: { openWorkRoomID = $0 }
                                     )
                                         .id(run.id)
                                 }
@@ -134,7 +465,9 @@ struct ChatView: View {
                                 ExecutionFlowView(
                                     run: run,
                                     messageFontSize: chatFontSize,
-                                    conversationWidth: conversationWidth
+                                    conversationWidth: conversationWidth,
+                                    workRooms: viewModel.workRooms,
+                                    onOpenWorkRoom: { openWorkRoomID = $0 }
                                 )
                                     .id(run.id)
                             }
@@ -157,6 +490,8 @@ struct ChatView: View {
                                         viewModel.retryRecovery()
                                     }
                                     .buttonStyle(.borderless)
+                                    .frame(minHeight: 28)
+                                    .contentShape(Rectangle())
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
@@ -262,6 +597,12 @@ struct ChatView: View {
                         .foregroundColor(.secondary)
                 }
 
+                if !filteredSkills.isEmpty {
+                    skillPalette
+                        .padding(.bottom, 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 HStack(spacing: 10) {
                     Button(action: openFilePanel) {
                         Image(systemName: "plus")
@@ -286,7 +627,69 @@ struct ChatView: View {
                     .lineLimit(1...5)
                     .disabled(viewModel.pendingInteraction != nil)
                     .onSubmit {
-                        viewModel.sendMessage()
+                        if let completion = SkillPaletteNavigation.completion(
+                            for: filteredSkills.map(\.name),
+                            selectedIndex: selectedSkillIndex
+                        ) {
+                            viewModel.inputText = completion
+                            isInputFocused = true
+                        } else {
+                            viewModel.sendMessage()
+                        }
+                    }
+                    .onChange(of: skillPaletteQuery) { _, _ in
+                        selectedSkillIndex = 0
+                    }
+                    .onKeyPress(.downArrow) {
+                        guard skillPaletteQuery != nil,
+                              let nextIndex = SkillPaletteNavigation.movedIndex(
+                                  currentIndex: selectedSkillIndex,
+                                  skillCount: filteredSkills.count,
+                                  offset: 1
+                              ) else {
+                            return .ignored
+                        }
+
+                        isKeyboardNavigatingSkills = true
+                        selectedSkillIndex = nextIndex
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        guard skillPaletteQuery != nil,
+                              let nextIndex = SkillPaletteNavigation.movedIndex(
+                                  currentIndex: selectedSkillIndex,
+                                  skillCount: filteredSkills.count,
+                                  offset: -1
+                              ) else {
+                            return .ignored
+                        }
+
+                        isKeyboardNavigatingSkills = true
+                        selectedSkillIndex = nextIndex
+                        return .handled
+                    }
+                    .onKeyPress(.tab) {
+                        guard skillPaletteQuery != nil,
+                              let completion = SkillPaletteNavigation.completion(
+                                  for: filteredSkills.map(\.name),
+                                  selectedIndex: selectedSkillIndex
+                              ) else {
+                            return .ignored
+                        }
+
+                        viewModel.inputText = completion
+                        isInputFocused = true
+                        return .handled
+                    }
+                    .onKeyPress(.escape) {
+                        guard skillPaletteQuery != nil,
+                              !filteredSkills.isEmpty else {
+                            return .ignored
+                        }
+
+                        viewModel.inputText = ""
+                        selectedSkillIndex = 0
+                        return .handled
                     }
 
                     Button(action: viewModel.toggleVoiceInput) {
@@ -328,7 +731,15 @@ struct ChatView: View {
                         if viewModel.isExecutionModeChangePending {
                             ProgressView()
                                 .controlSize(.mini)
+                            Text("\(viewModel.desiredExecutionMode.displayName) pending")
+                                .font(.system(size: AppFontSize.caption))
+                                .foregroundStyle(.secondary)
                                 .help("Waiting for the hosted agent to confirm the mode")
+                        } else if let turnsLeft = viewModel.acceptTurnsLeft {
+                            Text("\(turnsLeft) \(turnsLeft == 1 ? "turn" : "turns") left")
+                                .font(.system(size: AppFontSize.caption, weight: .medium).monospacedDigit())
+                                .foregroundStyle(OOColor.inkSecondary)
+                                .help("Accept mode ends after these turns")
                         }
                         ExecutionModeSelector(viewModel: viewModel)
                     }
@@ -347,6 +758,7 @@ struct ChatView: View {
                         )
                 )
                 .animation(.easeInOut(duration: 0.15), value: isInputFocused)
+                .animation(.easeInOut(duration: 0.15), value: filteredSkills.isEmpty)
                 }
             }
             .padding(.bottom, 14)
@@ -532,4 +944,48 @@ struct ChatView: View {
     }
 }
 
+enum SkillPaletteNavigation {
+    static func movedIndex(
+        currentIndex: Int,
+        skillCount: Int,
+        offset: Int
+    ) -> Int? {
+        guard skillCount > 0 else { return nil }
+
+        return (currentIndex + offset + skillCount) % skillCount
+    }
+
+    static func completion(
+        for skillNames: [String],
+        selectedIndex: Int
+    ) -> String? {
+        guard skillNames.indices.contains(selectedIndex) else {
+            return nil
+        }
+
+        return "/\(skillNames[selectedIndex]) "
+    }
+}
+
 /// Shows the latest session usage in a single compact line.
+
+/// The Control Center is 320 to 900 points wide and starts at 500 as per webchat
+enum ControlCenterPaneWidth {
+    static let minimum = 320.0
+    static let maximum = 900.0
+    static let initial = 500.0
+    static let keyStep = 10.0
+    static let handleWidth: CGFloat = 12 // original value = 6
+    /// oo-chat keeps the chat column at lg:min-w-[360px] (workspace-shell.tsx); the pane gives way, not the chat.
+    static let minimumChatWidth = 360.0
+    static func clamped(_ width: Double) -> Double {
+        min(maximum, max(minimum, width))
+    }
+
+    /// The pane's width on screen in a detail area `detailWidth` wide: `width` cut down so the chat keeps
+    /// `minimumChatWidth`. As in oo-chat, the pane shrinks below its own minimum rather than hide.
+    static func fitted(_ width: Double, in detailWidth: Double) -> Double {
+        let room = detailWidth - Double(handleWidth) - minimumChatWidth
+        return max(0, min(clamped(width), room))
+    }
+}

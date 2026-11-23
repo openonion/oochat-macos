@@ -4,8 +4,10 @@ import Foundation
 enum NavigationItem: Hashable {
     case session(UUID)
     case newConfiguration
+    case chooseAgent
     case usage
     case settings
+    case balance
 }
 
 /// Reachability of a configured agent as reported by its latest status probe.

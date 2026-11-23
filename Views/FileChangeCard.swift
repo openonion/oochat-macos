@@ -1,17 +1,32 @@
 import SwiftUI
 import AppKit
+import ConnectOnionKit
 
 struct FileChangeCard: View {
     let change: FileChangeSummary
     let status: ExecutionStatus
     let timingMS: Double?
 
-    @State private var isExpanded = true
+    @State private var isExpanded: Bool
+    @State private var hasToggledByHand = false
     @State private var copiedLabel: String?
+
+    init(change: FileChangeSummary, status: ExecutionStatus, timingMS: Double?) {
+        self.change = change
+        self.status = status
+        self.timingMS = timingMS
+        _isExpanded = State(initialValue: Self.startsOpen(for: status))
+    }
+
+    /// A diff stays open while its call runs or has failed, and starts folded once the call is done.
+    static func startsOpen(for status: ExecutionStatus) -> Bool {
+        status != .done
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
+                hasToggledByHand = true
                 withAnimation(.easeInOut(duration: 0.15)) {
                     isExpanded.toggle()
                 }
@@ -90,24 +105,31 @@ struct FileChangeCard: View {
                 .padding(.vertical, 8)
             }
         }
-        .background(AppPalette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(OOColor.paper)
+        .clipShape(RoundedRectangle(cornerRadius: OORadius.card, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(AppPalette.divider, lineWidth: 1)
+            RoundedRectangle(cornerRadius: OORadius.card, style: .continuous)
+                .stroke(OOColor.hairline, lineWidth: 1)
         }
         .frame(maxWidth: 920, alignment: .leading)
+        .onChange(of: status) { _, newStatus in
+            if newStatus == .done, !hasToggledByHand {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isExpanded = false
+                }
+            }
+        }
     }
 
     @ViewBuilder
     private var statusIcon: some View {
-        if status == .running {
-            ProgressView()
-                .controlSize(.small)
-        } else {
-            Image(systemName: status == .error ? "xmark" : "checkmark")
-                .font(.system(size: AppFontSize.body, weight: .semibold))
-                .foregroundStyle(status == .error ? AppPalette.error : AppPalette.success)
+        switch status {
+        case .running:
+            OOToolStatus(.running)
+        case .done:
+            OOToolStatus(.done)
+        case .error:
+            OOToolStatus(.failed)
         }
     }
 
@@ -146,20 +168,23 @@ struct FileChangeCard: View {
     }
 
     private func copyButton(label: String, value: String) -> some View {
-        Button(copiedLabel == label ? "Copied" : label) {
+        Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(value, forType: .string)
             copiedLabel = label
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                if copiedLabel == label {
-                    copiedLabel = nil
-                }
+                if copiedLabel == label { copiedLabel = nil }
             }
+        } label: {
+            Text(copiedLabel == label ? "Copied" : label)
+                .font(.caption)
+                .foregroundStyle(copiedLabel == label ? AppPalette.success : Color.secondary)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .font(.caption)
-        .foregroundStyle(copiedLabel == label ? AppPalette.success : Color.secondary)
     }
 
     private func formatDuration(_ milliseconds: Double) -> String {
