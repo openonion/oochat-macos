@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import ConnectOnionKit
 
 /// Facade over the hosted-agent connection: validates 0x address and Direct URL
 /// targets, delegates the protocol lifecycle to the remote-agent client, and
@@ -35,6 +36,10 @@ final class ConnectOnionService: ObservableObject {
     @Published var desiredExecutionMode: AgentExecutionMode = .safe
     /// Mode the agent last acknowledged, via snapshot or a modeChanged event.
     @Published var confirmedExecutionMode: AgentExecutionMode = .safe
+    /// Modes that the host listed in CONNECTED. Empty until one arrives, so accept stays hidden.
+    @Published var availableExecutionModes: [AgentExecutionMode] = []
+    /// Turns left in accept mode, from mode_changed or CONNECTED; nil in other modes
+    @Published var acceptTurnsLeft: Int?
     /// True while a send or recovery is in flight; messages arriving meanwhile
     /// are fed into the running request as runtime input.
     @Published var isAgentRequestActive = false
@@ -117,6 +122,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = true
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         connectionError = nil
         isConnected = true
 
@@ -174,6 +181,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = false
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         isAgentRequestActive = false
         isInterruptRequested = false
         currentConfiguration = nil
@@ -261,7 +270,12 @@ final class ConnectOnionService: ObservableObject {
                 hostedAgentStatusDetail = error.localizedDescription
                 isHostedAgentStatusLive = false
             }
-            incomingEvents.send(.error(error.localizedDescription))
+            // -32010 gets its own screen. Every other failure keeps the old error event.
+            if let incompatibility = (error as? ConnectOnionRemoteError)?.incompatibility {
+                incomingEvents.send(.incompatible(incompatibility))
+            } else {
+                incomingEvents.send(.error(error.localizedDescription))
+            }
         }
     }
 
@@ -403,9 +417,17 @@ final class ConnectOnionService: ObservableObject {
     /// Forwards transport events to the UI, mirroring mode changes and, while in
     /// accept mode, answering approval requests without surfacing them.
     private func emit(_ event: ConnectOnionTransportEvent) {
-        if case .modeChanged(let mode) = event {
+        if case .modeChanged(let mode, let turnsLeft) = event {
             desiredExecutionMode = mode
             confirmedExecutionMode = mode
+            acceptTurnsLeft = mode == .accept ? turnsLeft : nil
+        }
+        if case .sessionModes(let available, let current, let turnsLeft) = event {
+            availableExecutionModes = available
+            if let current {
+                confirmedExecutionMode = current
+            }
+            acceptTurnsLeft = current == .accept ? turnsLeft : nil
         }
         if case .approvalRequired = event,
            desiredExecutionMode == .accept {
@@ -453,6 +475,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = false
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         isAgentRequestActive = false
         isInterruptRequested = false
         currentConfiguration = nil

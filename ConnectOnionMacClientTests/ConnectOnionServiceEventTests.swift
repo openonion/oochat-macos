@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import XCTest
+import ConnectOnionKit
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionServiceTests {
@@ -235,7 +236,7 @@ extension ConnectOnionServiceTests {
         switch event {
         case .output(let value):
             return "output:\(value)"
-        case .modeChanged(let value):
+        case .modeChanged(let value, _):
             return "mode:\(value.rawValue)"
         case .error(let value):
             return "error:\(value)"
