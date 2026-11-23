@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ExecutionItemRow: View {
@@ -139,12 +140,13 @@ struct ExecutionItemRow: View {
 
                     Spacer(minLength: 16)
 
-                    Text(toolCall.statusLabel(timing: toolCall.timingMS.map(formatDuration)))
+                    Text(toolCall.statusLabel(timing: toolCall.timingMS.flatMap(visibleDuration)))
                         .font(AppTypography.mono(size: AppFontSize.footnote, weight: .medium))
                         .tracking(0.5)
-                        .foregroundStyle(.secondary.opacity(0.7))
+                        .foregroundStyle(OOColor.inkSecondary)
                         .fixedSize()
                 }
+                .frame(minHeight: 28)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -158,20 +160,17 @@ struct ExecutionItemRow: View {
         }
     }
 
-    /// Leading indicator for in-progress and failed tool calls. Completed calls
-    /// show no marker — the tool icon alone carries a clean, un-noisy done state.
+    /// The kit's status mark: a waiting dot while the call runs, a check when it is done and
+    /// a cross when it failed.
     @ViewBuilder
     private func toolStatusIcon(_ status: ExecutionStatus) -> some View {
         switch status {
         case .running:
-            ProgressView()
-                .controlSize(.small)
+            OOToolStatus(.running)
         case .done:
-            EmptyView()
+            OOToolStatus(.done)
         case .error:
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: AppFontSize.subheadline))
-                .foregroundStyle(AppPalette.error)
+            OOToolStatus(.failed)
         }
     }
 
@@ -401,9 +400,10 @@ struct ExecutionItemRow: View {
                         if thinking.content?.isEmpty == false {
                             Image(systemName: "chevron.down")
                                 .font(.caption2)
-                                .foregroundStyle(.secondary.opacity(0.6))
+                                .foregroundStyle(OOColor.inkSecondary)
                         }
                     }
+                    .frame(minHeight: 28)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -446,7 +446,7 @@ struct ExecutionItemRow: View {
                         if hasExpected {
                             Image(systemName: "chevron.right")
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary.opacity(0.6))
+                                .foregroundStyle(OOColor.inkSecondary)
                                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         }
                     }
@@ -523,7 +523,7 @@ struct ExecutionItemRow: View {
             parts.append(formatTokens(usage.tokenCount))
             parts.append(formatCost(usage.totalCost))
         }
-        if let duration = thinking.durationMS, duration >= 1 {
+        if let duration = thinking.durationMS, duration >= 50 { // original was duration >= 1
             parts.append(formatDuration(duration))
         }
         return parts.joined(separator: " · ")
@@ -546,6 +546,9 @@ struct ExecutionItemRow: View {
         return String(format: "$%.2f", cost)
     }
 
+    private func visibleDuration(_ milliseconds: Double) -> String? {
+        milliseconds < 50 ? nil : formatDuration(milliseconds)
+    }
     private func formatDuration(_ milliseconds: Double) -> String {
         let seconds = milliseconds / 1_000
         if seconds < 0.05 {
@@ -572,3 +575,53 @@ struct ExecutionItemRow: View {
 }
 
 /// Presents a structured file mutation with status, diff, and copy actions.
+/// Finished tool calls collapsed to one line, e.g. "Ran 9 steps · 3.6 s".
+struct FinishedStepsGroupRow: View {
+    let steps: [ToolCallExecutionItem]
+    let messageFontSize: CGFloat
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: AppFontSize.caption, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 12)
+
+                    Text(ChatViewPresentation.finishedStepsSummary(steps))
+                        .font(AppTypography.mono(size: AppFontSize.body, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 16)
+                }
+                .frame(minHeight: 28)          // matches item 37
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .help(isExpanded ? "Hide steps" : "Show steps")
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(steps) { step in
+                        ExecutionItemRow(
+                            item: .toolCall(step),
+                            messageFontSize: messageFontSize,
+                            completionSummary: nil
+                        )
+                    }
+                }
+                .padding(.leading, 22)
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: 920, alignment: .leading)
+    }
+}

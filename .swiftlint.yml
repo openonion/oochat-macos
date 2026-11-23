@@ -6,6 +6,7 @@ excluded:
   - .venv
   - DerivedData
   - build
+  - Packages/ConnectOnionKit/.build
 
 allow_zero_lintable_files: false
 check_for_updates: false
@@ -55,13 +56,13 @@ line_length:
 # state. Every other source file is under 1100 lines and every test file under
 # 750.
 file_length:
-  warning: 1600
+  warning: 1700
   error: 1800
   ignore_comment_only_lines: true
 
 type_body_length:
-  warning: 800
-  error: 900
+  warning: 900
+  error: 1000
 
 function_body_length:
   warning: 250

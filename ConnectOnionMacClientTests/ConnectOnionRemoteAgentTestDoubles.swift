@@ -36,8 +36,12 @@ actor RemoteProtocolRecorder {
             events.append("onboarding")
         case .onboardingSucceeded(let value):
             events.append("onboarding_success:\(value)")
-        case .modeChanged(let value):
-            events.append("mode:\(value.rawValue)")
+        case .modeChanged(let value, let turnsLeft):
+            events.append("mode:\(value.rawValue)" + (turnsLeft.map { ":\($0)" } ?? ""))
+        case .sessionModes(let available, let current, _):
+            events.append(
+                "modes:\(available.map(\.rawValue).joined(separator: ",")):\(current?.rawValue ?? "none")"
+            )
         case .planReviewRequired:
             events.append("plan_review")
         case .ulwCheckpointRequired:
@@ -48,6 +52,16 @@ actor RemoteProtocolRecorder {
             events.append("interrupted")
         case .error(let value):
             events.append("error:\(value)")
+        case .incompatible(let value):
+            events.append("incompatible:\(value.neededVersion ?? "unknown")")
+        case .dashboard(.page(let html)):
+            events.append("dashboard:\(html.utf8.count)")
+        case .dashboard(.tooLarge(let bytes)):
+            events.append("dashboard_too_large:\(bytes)")
+        case .agentProfile:
+            events.append("agent_profile")
+        case .workRoomFrame:
+            events.append("work_room_frame")
         }
     }
 

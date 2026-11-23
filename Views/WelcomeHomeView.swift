@@ -1,209 +1,297 @@
 import SwiftUI
+import ConnectOnionKit
 
 struct WelcomeHomeView: View {
     let configuration: GeneralAgentConfiguration
     let isConnected: Bool
     let connectionSnapshot: AgentConnectionSnapshot?
+    let agentProfile: OIPAgentProfile?
+    /// The agent's Control Center page. Skills its buttons run come first among the chips.
+    var dashboard: OIPDashboard?
+    /// Puts text in the composer for the person to finish and send.
     let onSelectPrompt: (String) -> Void
 
-    @State private var areToolsExpanded: Bool
+    /// Chips on screen. With more skills than this, the last place opens the full list instead.
+    static let starterSlots = 4
 
-    private struct Suggestion {
-        let icon: String
-        let title: String
-        let description: String
-        let prompt: String
+    @State private var hoveredChip: String?
+
+    private var skills: [OIPAgentSkill] {
+        StarterSkills.ordered(agentProfile?.skills ?? [], dashboard: dashboard)
     }
 
-    private let suggestions: [Suggestion]
+    private var starterSkills: [OIPAgentSkill] {
+        skills.count > Self.starterSlots
+            ? Array(skills.prefix(Self.starterSlots - 1))
+            : skills
+    }
 
-    init(
-        configuration: GeneralAgentConfiguration,
-        isConnected: Bool,
-        connectionSnapshot: AgentConnectionSnapshot?,
-        areToolsExpanded: Bool = false,
-        onSelectPrompt: @escaping (String) -> Void
-    ) {
-        self.configuration = configuration
-        self.isConnected = isConnected
-        self.connectionSnapshot = connectionSnapshot
-        self.onSelectPrompt = onSelectPrompt
-        _areToolsExpanded = State(initialValue: areToolsExpanded)
-        suggestions = [
-            Suggestion(
-                icon: "questionmark.circle.fill",
-                title: "Ask a question",
-                description: "Get quick answers on anything",
-                prompt: "Can you help me understand "
-            ),
-            Suggestion(
-                icon: "doc.text.fill",
-                title: "Summarize text",
-                description: "Condense long text into key points",
-                prompt: "Please summarize the following: "
-            ),
-            Suggestion(
-                icon: "lightbulb.fill",
-                title: "Brainstorm ideas",
-                description: "Explore ideas and possibilities",
-                prompt: "Help me brainstorm ideas for "
-            )
+    /// Tool tags shown for an agent without skills; the rest are counted as "+N more".
+    static let toolTagLimit = 8
+
+    /// The agent's tool names, from its profile or, before that arrives, its /info.
+    private var tools: [String] {
+        let profileTools = agentProfile?.tools ?? []
+        return profileTools.isEmpty ? (connectionSnapshot?.tools ?? []) : profileTools
+    }
+
+    private var hint: String {
+        guard agentProfile != nil else {
+            return "Connecting…"
+        }
+        guard skills.isEmpty else {
+            return "Pick a skill or type a message."
+        }
+        return Self.capabilitySentence(tools: tools) ?? "Type a message to start."
+    }
+
+    /// One plain line from the agent's tools, e.g. "Can read and edit files and run commands."
+    /// Nil when no tool is a known kind, so the screen never guesses what an agent does.
+    static func capabilitySentence(tools: [String]) -> String? {
+        let kinds: [(phrase: String, words: [String])] = [
+            ("read files", ["read", "glob", "grep", "list"]),
+            ("edit files", ["write", "edit", "patch", "create_file", "delete"]),
+            ("run commands", ["bash", "shell", "command", "exec", "run"]),
+            ("browse the web", ["web", "fetch", "browser", "http"]),
+            ("send email", ["mail"])
         ]
+        let names = tools.map { $0.lowercased() }
+        var phrases = kinds
+            .filter { kind in names.contains { name in kind.words.contains { name.contains($0) } } }
+            .map(\.phrase)
+
+        if let read = phrases.firstIndex(of: "read files"), phrases.contains("edit files") {
+            phrases[read] = "read and edit files"
+            phrases.removeAll { $0 == "edit files" }
+        }
+        guard let last = phrases.last else {
+            return nil
+        }
+        let list = phrases.count == 1
+            ? last
+            : phrases.dropLast().joined(separator: ", ") + " and " + last
+        return "Can \(list)."
+    }
+
+    private var isUnnamed: Bool {
+        configuration.name.isEmpty || configuration.name.hasPrefix("0x")
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer(minLength: 20)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(configuration.name)
+                    .font(isUnnamed ? OOFont.mono(size: 24) : OOFont.headline(size: 36))
+                    .tracking(isUnnamed ? 0 : -0.72) // web: tracking-[-0.02em]
+                    .foregroundStyle(OOColor.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
 
-            AgentAvatarView(
-                name: configuration.name,
-                textColorHex: configuration.avatarTextColorHex,
-                backgroundColorHex: configuration.avatarBackgroundColorHex,
-                size: 56
+                Text(hint)
+                    .font(.system(size: 14))
+                    .foregroundStyle(OOColor.inkSecondary)
+                    .padding(.top, 8)
+
+                if !skills.isEmpty {
+                    starterChips
+                        .padding(.top, 24)
+                } else if agentProfile != nil {
+                    // No skills: show what the agent has to work with, and how starters get here.
+                    if !tools.isEmpty {
+                        toolTags
+                            .padding(.top, 20)
+                    }
+
+                    Text("Skills you add in .co/skills show up here as one-click starters.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(OOColor.inkTertiary)
+                        .padding(.top, 16)
+                }
+            }
+            .frame(maxWidth: 672, alignment: .topLeading) // web: max-w-[720] minus px-6
+            .padding(.horizontal, 24)
+            .padding(.top, 56)
+            .padding(.bottom, 16)
+            // the scroller belongs to the pane, so it sits at the far right
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .scrollIndicators(.visible)
+        .background {
+            LegacyScrollBarStyle()
+        }
+    }
+
+    /// The agent's tools as quiet tags: real names, not buttons.
+    private var toolTags: some View {
+        let shown = Array(tools.prefix(Self.toolTagLimit))
+        let hidden = tools.count - shown.count
+
+        return LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 110), spacing: 6, alignment: .leading)],
+            alignment: .leading,
+            spacing: 6
+        ) {
+            ForEach(shown, id: \.self) { tool in
+                toolTag(tool)
+            }
+            if hidden > 0 {
+                toolTag("+\(hidden) more")
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Tools: \(tools.joined(separator: ", "))")
+    }
+
+    private func toolTag(_ text: String) -> some View {
+        Text(text)
+            .font(OOFont.mono(size: 12))
+            .foregroundStyle(OOColor.inkSecondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .overlay(
+                RoundedRectangle(cornerRadius: OORadius.medium, style: .continuous)
+                    .stroke(OOColor.hairline, lineWidth: 1)
             )
+    }
 
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(configuration.name)
-                        .font(.system(size: AppFontSize.pageTitle, weight: .semibold))
-                        .foregroundColor(.primary)
-
-                    Circle()
-                        .fill(isConnected ? AppPalette.success : AppPalette.error)
-                        .frame(width: 7, height: 7)
-
-                    Text(isConnected ? "online" : "offline")
-                        .font(AppTypography.mono(size: AppFontSize.caption, weight: .medium))
-                        .foregroundColor(isConnected ? AppPalette.success : AppPalette.error)
-                }
-
-                Text(metadataText)
-                    .font(AppTypography.mono(size: AppFontSize.caption))
-                    .foregroundColor(.secondary)
-            }
-
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 170), spacing: 10)],
-                spacing: 10
-            ) {
-                ForEach(suggestions, id: \.title) { suggestion in
-                    Button {
-                        onSelectPrompt(suggestion.prompt)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: suggestion.icon)
-                                .font(.system(size: AppFontSize.subheadline, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 24, height: 24)
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(suggestion.title)
-                                    .font(.system(size: AppFontSize.body, weight: .medium))
-                                    .foregroundColor(.primary)
-
-                                Text(suggestion.description)
-                                    .font(.system(size: AppFontSize.footnote))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                            }
-
-                            Spacer(minLength: 0)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(AppPalette.surfaceMuted)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(maxWidth: 560)
-
-            if !tools.isEmpty {
-                VStack(spacing: 10) {
-                    Button {
-                        areToolsExpanded.toggle()
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text("\(tools.count) tools")
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .semibold))
-                                .rotationEffect(.degrees(areToolsExpanded ? 180 : 0))
-                        }
-                        .font(AppTypography.mono(size: AppFontSize.caption, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(areToolsExpanded ? "Hide agent tools" : "Show agent tools")
-                    .help(areToolsExpanded ? "Hide agent tools" : "Show agent tools")
-
-                    if areToolsExpanded {
-                        ScrollView {
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 120), spacing: 8)],
-                                alignment: .leading,
-                                spacing: 8
-                            ) {
-                                ForEach(tools, id: \.self) { tool in
-                                    Text(tool)
-                                        .font(AppTypography.mono(size: AppFontSize.footnote))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 10)
-                                        .frame(height: 32)
-                                        .background(AppPalette.surfaceMuted)
-                                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                                }
-                            }
-                        }
-                        .frame(maxWidth: 560, maxHeight: 180)
-                    }
+    /// Up to four cards in two fixed columns: the skill name, then its first sentence on one line.
+    /// The full description is the hover tooltip, for skills whose first sentence is cut off.
+    private var starterChips: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(), spacing: OOSpace.small, alignment: .leading),
+                GridItem(.flexible(), alignment: .leading)
+            ],
+            alignment: .leading,
+            spacing: OOSpace.small
+        ) {
+            ForEach(starterSkills, id: \.name) { skill in
+                card(
+                    "/\(skill.name)",
+                    summary: firstSentence(of: skill.description ?? ""),
+                    leadingSymbol: "command",
+                    help: skill.description ?? "/\(skill.name)"
+                ) {
+                    onSelectPrompt("/\(skill.name) ")
                 }
             }
 
-            Spacer(minLength: 20)
+            if skills.count > starterSkills.count {
+                // A lone "/" opens the composer's skill palette with every skill.
+                card(
+                    "All \(skills.count) skills",
+                    trailingSymbol: "chevron.right",
+                    help: "Show every skill this agent has"
+                ) {
+                    onSelectPrompt("/")
+                }
+            }
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var tools: [String] {
-        connectionSnapshot?.tools ?? []
+    private func card(
+        _ title: String,
+        summary: String = "",
+        leadingSymbol: String? = nil,
+        trailingSymbol: String? = nil,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: OORadius.large, style: .continuous)
+        let isHovered = hoveredChip == title
+
+        return Button(action: action) {
+            HStack(spacing: 7) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 7) {
+                        if let leadingSymbol {
+                            chipSymbol(leadingSymbol)
+                        }
+
+                        Text(title)
+                            .font(.system(size: 14))
+                            .foregroundStyle(OOColor.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    if !summary.isEmpty {
+                        Text(summary)
+                            .font(.system(size: 12))
+                            .foregroundStyle(OOColor.inkSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            // lines up under the name, past the glyph
+                            .padding(.leading, leadingSymbol == nil ? 0 : 22)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                if let trailingSymbol {
+                    chipSymbol(trailingSymbol)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+            .background(isHovered ? OOColor.hover : OOColor.paper, in: shape)
+            // The border brightens with the fill, so the card reads as clickable on the dark pane.
+            .overlay(shape.stroke(isHovered ? OOColor.inkTertiary : OOColor.hairline, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            if isHovering {
+                hoveredChip = title
+            } else if hoveredChip == title {
+                hoveredChip = nil
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .help(help)
+        .disabled(!isConnected)
+        .opacity(isConnected ? 1 : 0.5)
     }
 
-    private var metadataText: String {
-        var parts: [String] = []
-
-        if let model = displayedModel {
-            parts.append(model)
+    /// The description's first sentence, so a card stays to one short line.
+    private func firstSentence(of description: String) -> String {
+        guard let range = description.range(
+            of: #".+?[.!?。！？](?=\s|$)"#,
+            options: .regularExpression
+        ) else {
+            return description
         }
 
-        if let trust = connectionSnapshot?.trust?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trust.isEmpty {
-            parts.append(trust)
-        }
-
-        if let version = connectionSnapshot?.version?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !version.isEmpty {
-            parts.append(version.hasPrefix("v") ? version : "v\(version)")
-        }
-
-        return parts.isEmpty ? "Hosted agent" : parts.joined(separator: " · ")
+        return String(description[range])
     }
 
-    private var displayedModel: String? {
-        let model = connectionSnapshot?.model
-        guard let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed.hasPrefix("co/") ? String(trimmed.dropFirst(3)) : trimmed
+    // The same green command glyph as the composer's skill palette, so the chips read as skills.
+    private func chipSymbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(OOColor.primary)
+            .frame(width: 15, height: 15)
+            .accessibilityHidden(true)
     }
 }
 
-#Preview {
-    ContentView()
+private struct LegacyScrollBarStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+
+        DispatchQueue.main.async {
+            view.enclosingScrollView?.scrollerStyle = .legacy
+        }
+
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            view.enclosingScrollView?.scrollerStyle = .legacy
+        }
+    }
 }

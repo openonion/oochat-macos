@@ -1,4 +1,5 @@
 import SwiftUI
+import ConnectOnionKit
 
 private struct SidebarAgentHeaderState {
     let hasChats: Bool
@@ -40,18 +41,21 @@ struct SidebarView: View {
     @State private var hoveredConfigId: UUID?
     @State private var hoveredSessionId: UUID?
     @State private var hoveredNewChat: Bool
+    @State private var hoveredLogo = false
     @State private var hoveredUsage = false
     @State private var hoveredSettings: Bool
     @State private var searchText: String
     @State private var isAgentsSectionExpanded: Bool
-    @State private var agentChatExpansionState =
-        SidebarAgentChatExpansionState()
+    @State private var agentChatExpansionState = SidebarAgentChatExpansionState()
     @State private var editingAgentId: UUID?
     @State private var editingAgentName: String
     @State private var editingSessionId: UUID?
     @State private var editingSessionTitle: String
     @State private var agentPendingDeletion: GeneralAgentConfiguration?
     @State private var sessionPendingDeletion: ChatSession?
+    // Dropdown menu for sidebar view chats
+    @State private var activeSessionMenuId: UUID?
+    @State private var activeAgentMenuId: UUID?
     @FocusState private var focusedAgentId: UUID?
     @FocusState private var focusedSessionId: UUID?
 
@@ -148,7 +152,6 @@ struct SidebarView: View {
             }
 
             VStack(spacing: 2) {
-                usageButton
                 settingsButton
             }
             .padding(.horizontal, 10)
@@ -156,7 +159,7 @@ struct SidebarView: View {
             .padding(.bottom, 12)
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(AppPalette.sidebarSurface)
+        .background(OOColor.paper)
         .onAppear {
             appViewModel.refreshAgentStatuses()
         }
@@ -196,13 +199,30 @@ struct SidebarView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            logoMark
+            Button {
+                appViewModel.selection = .chooseAgent
+            } label: {
+                HStack(spacing: 10) {
+                    logoMark
 
-            Text("ConnectOnion")
-                .font(.system(size: 16, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
-                .lineLimit(1)
-                .layoutPriority(1)
+                    Text("ConnectOnion")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(hoveredLogo ? OOColor.surface : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Go to agent picker")
+            .accessibilityLabel("ConnectOnion — Go to agent picker")
+            .onHover { hoveredLogo = $0 }
 
             Spacer()
 
@@ -216,12 +236,13 @@ struct SidebarView: View {
     private var onlineAgentIndicator: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(AppPalette.success)
+                // Green only when something is online, grey at "0 online".
+                .fill(onlineAgentCount > 0 ? OOColor.live : OOColor.inkSecondary)
                 .frame(width: 7, height: 7)
 
             Text("\(onlineAgentCount) online")
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OOColor.inkSecondary)
                 .lineLimit(1)
                 .fixedSize()
         }
@@ -230,7 +251,7 @@ struct SidebarView: View {
     }
 
     private var logoMark: some View {
-        Image("Onion")
+        OOLogo.image
             .resizable()
             .scaledToFit()
             .frame(width: 28, height: 28)
@@ -250,21 +271,20 @@ struct SidebarView: View {
                     .frame(width: 18)
 
                 Text("New chat")
-                    .font(.system(size: AppFontSize.body, weight: .medium))
+                    .font(.system(size: AppFontSize.body, weight: .semibold))
 
                 Spacer()
             }
-            .foregroundStyle(.primary)
+            .foregroundStyle(.white)
             .padding(.horizontal, 10)
             .frame(height: 38)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(hoveredNewChat ? AppPalette.hoverSurface : Color.clear)
+                    .fill(OOColor.live)
             )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hoveredNewChat = $0 }
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
@@ -295,8 +315,11 @@ struct SidebarView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: AppFontSize.caption))
                         .foregroundColor(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .padding(.trailing, -8)
                 .accessibilityLabel("Clear search")
                 .help("Clear search")
             }
@@ -306,7 +329,7 @@ struct SidebarView: View {
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(AppPalette.surfaceMuted)
+                .fill(OOColor.surface)
         )
         .padding(.horizontal, 14)
         .padding(.bottom, 10)
@@ -328,9 +351,10 @@ struct SidebarView: View {
                 Text("AGENTS")
                     .font(.system(size: AppFontSize.footnote, weight: .semibold))
                     .tracking(0.8)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(OOColor.inkSecondary)
                     .fixedSize()
                 }
+                .frame(minHeight: 28)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -338,15 +362,26 @@ struct SidebarView: View {
             Spacer()
 
             Button(action: showConnectAgent) {
-                Image(systemName: "plus")
-                    .font(.system(size: AppFontSize.footnote, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+                HStack(spacing: 6) {
+                    Image(systemName: "person.badge.plus")
+                        .font(.system(size: AppFontSize.footnote, weight: .semibold))
+
+                    Text("Add agent")
+                        .font(.system(size: AppFontSize.caption, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(OOColor.live)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Connect agent")
-            .help("Connect agent")
+            .accessibilityLabel("Add agent")
+            .help("Add agent")
+
         }
         .padding(.leading, 6)
         .padding(.trailing, 2)
@@ -368,7 +403,7 @@ struct SidebarView: View {
 private extension SidebarView {
     /// Builds an agent row with connection state and inline editing controls.
     private func agentRow(for config: GeneralAgentConfiguration) -> some View {
-        let sessions = appViewModel.sessions
+        let sessions = appViewModel.visibleSessions
             .filter { $0.agentConfigId == config.id }
             .sorted { $0.updatedAt > $1.updatedAt }
         let isConnected = appViewModel.isAgentConnected(config)
@@ -401,33 +436,19 @@ private extension SidebarView {
         for config: GeneralAgentConfiguration,
         state: SidebarAgentHeaderState
     ) -> some View {
+
         HStack(spacing: 8) {
-            AgentChatDisclosureButton(
-                agentName: config.name,
-                hasChats: state.hasChats,
-                isExpanded: state.areChatsExpanded
-            ) {
-                toggleChats(for: config.id)
-            }
-
-            AgentAvatarView(
-                name: config.name,
-                textColorHex: config.avatarTextColorHex,
-                backgroundColorHex: config.avatarBackgroundColorHex,
-                size: 24
-            )
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(statusDotColor(isConnected: state.isConnected))
-                    .frame(width: 7, height: 7)
-                    .overlay {
-                        Circle()
-                            .stroke(AppPalette.sidebarSurface, lineWidth: 1.5)
-                    }
-            }
-            .help(state.isConnected ? "Connected" : "Disconnected")
-
             if state.isEditing {
+                AgentChatDisclosureButton(
+                    agentName: config.name,
+                    hasChats: state.hasChats,
+                    isExpanded: state.areChatsExpanded
+                ) {
+                    toggleChats(for: config.id)
+                }
+
+                OOAvatarTile(name: config.name, isOnline: state.isConnected)
+
                 TextField("Agent name", text: $editingAgentName)
                     .textFieldStyle(.plain)
                     .font(.system(size: AppFontSize.body, weight: .semibold))
@@ -439,13 +460,46 @@ private extension SidebarView {
                         cancelRenamingAgent()
                     }
             } else {
-                Text(config.name)
-                    .font(.system(size: AppFontSize.body, weight: .semibold))
-                    .foregroundColor(.primary.opacity(state.isActive ? 1 : 0.9))
-                    .lineLimit(1)
-            }
+                Button {
+                    toggleChats(for: config.id)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(OOColor.inkSecondary)
+                            .frame(width: 18)
+                            .rotationEffect(
+                                .degrees(state.areChatsExpanded ? 0 : -90)
+                            )
 
-            Spacer()
+                        OOAvatarTile(
+                            name: config.name,
+                            isOnline: state.isConnected
+                        )
+
+                        Text(config.name)
+                            .font(.system(
+                                size: AppFontSize.body,
+                                weight: .semibold
+                            ))
+                            .foregroundColor(
+                                .primary.opacity(state.isActive ? 1 : 0.9)
+                            )
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!state.hasChats)
+                .accessibilityLabel(config.name)
+                .accessibilityHint(
+                    state.areChatsExpanded
+                        ? "Collapse chats"
+                        : "Expand chats"
+                )
+            }
 
             agentTrailingActions(
                 for: config,
@@ -514,25 +568,86 @@ private extension SidebarView {
             }
             .accessibilityLabel("Save agent name")
             .help("Save agent name")
-        } else if isHovered {
+
+        } else {
+
             HStack(spacing: 2) {
-                iconButton("plus") {
+
+                // Original individual Add Chat button
+                Button {
                     appViewModel.createNewSession(for: config)
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: AppFontSize.footnote))
+                        .foregroundStyle(OOColor.live)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
                 .accessibilityLabel("New chat")
                 .help("New chat")
 
-                iconButton("pencil") {
-                    startRenamingAgent(config)
+                // Three-dot agent actions menu
+                Button {
+                    activeAgentMenuId = activeAgentMenuId == config.id
+                        ? nil
+                        : config.id
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: AppFontSize.body, weight: .medium))
+                        .foregroundStyle(OOColor.live)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
-                .accessibilityLabel("Rename agent")
-                .help("Rename agent")
-
-                iconButton("trash") {
-                    agentPendingDeletion = config
+                .buttonStyle(.plain)
+                .accessibilityLabel("Agent actions")
+                .help("Agent actions")
+                .popover(
+                    isPresented: Binding(
+                        get: { activeAgentMenuId == config.id },
+                        set: { isPresented in
+                            if !isPresented {
+                                activeAgentMenuId = nil
+                            }
+                        }
+                    ),
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .bottom
+                ) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            activeAgentMenuId = nil
+                            startRenamingAgent(config)
+                        } label: {
+                            HStack {
+                                Label("Rename agent", systemImage: "pencil")
+                                Spacer(minLength: 0)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Divider()
+                        Button(role: .destructive) {
+                            activeAgentMenuId = nil
+                            agentPendingDeletion = config
+                        } label: {
+                            HStack {
+                                Label("Delete agent", systemImage: "trash")
+                                Spacer(minLength: 0)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(6)
+                    .frame(width: 180, alignment: .leading)
                 }
-                .accessibilityLabel("Delete agent")
-                .help("Delete agent")
             }
         }
     }
@@ -543,7 +658,7 @@ private extension SidebarView {
                 Text(group.label.uppercased())
                     .font(.system(size: AppFontSize.footnote, weight: .semibold))
                     .tracking(0.5)
-                    .foregroundColor(.secondary.opacity(0.7))
+                    .foregroundColor(OOColor.inkSecondary)
                     .padding(.leading, 4)
                     .padding(.top, 4)
 
@@ -667,47 +782,138 @@ private extension SidebarView {
                 }
             }
         } else {
-            Button {
-                appViewModel.selectHistoricalSession(session.id)
-            } label: {
-                HStack(alignment: .top, spacing: 6) {
-                    Text(session.title)
-                        .font(.system(size: AppFontSize.body, weight: isSelected ? .semibold : .regular))
-                        .foregroundColor(isSelected ? .primary : .primary.opacity(0.7))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 2) {
+                // Chat selection button
+                Button {
+                    appViewModel.selectHistoricalSession(session.id)
+                } label: {
+                    HStack(alignment: .center, spacing: 6) {
+                        Text(session.title)
+                            .font(
+                                .system(
+                                    size: AppFontSize.body,
+                                    weight: isSelected ? .semibold : .regular
+                                )
+                            )
+                            .foregroundColor(
+                                isSelected ? OOColor.ink : OOColor.inkSecondary
+                            )
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                    Spacer(minLength: 4)
+                        Spacer(minLength: 4)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 7)
+                    .frame(minHeight: 28)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
 
-                    if isHovered {
-                        iconButton("pencil") {
-                            startRenamingSession(session)
+                // New Chat and three-dot actions
+                if isHovered || isSelected || activeSessionMenuId == session.id {
+                    HStack(spacing: 2) {
+
+                        // Create a new chat using the same agent
+                        Button {
+                            if let configuration = appViewModel.configuration(for: session) {
+                                appViewModel.createNewSession(for: configuration)
+                            }
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: AppFontSize.body, weight: .medium))
+                                .foregroundStyle(OOColor.live)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
-                        .accessibilityLabel("Rename chat")
-                        .help("Rename chat")
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("New chat")
+                        .help("New chat")
 
-                        iconButton("trash") {
-                            sessionPendingDeletion = session
+                        // Three-dot actions menu
+                        Button {
+                            activeSessionMenuId = activeSessionMenuId == session.id
+                                ? nil
+                                : session.id
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: AppFontSize.body, weight: .medium))
+                                .foregroundStyle(OOColor.live)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
-                        .accessibilityLabel("Delete chat")
-                        .help("Delete chat")
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Chat actions")
+                        .help("Chat actions")
+                        .popover(
+                            isPresented: Binding(
+                                get: { activeSessionMenuId == session.id },
+                                set: { isPresented in
+                                    if !isPresented {
+                                        activeSessionMenuId = nil
+                                    }
+                                }
+                            ),
+                            attachmentAnchor: .rect(.bounds),
+                            arrowEdge: .bottom
+                        ) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Button {
+                                    activeSessionMenuId = nil
+                                    startRenamingSession(session)
+                                } label: {
+                                    HStack {
+                                        Label("Rename chat", systemImage: "pencil")
+                                        Spacer(minLength: 0)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 6)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                Divider()
+
+                                Button(role: .destructive) {
+                                    activeSessionMenuId = nil
+                                    sessionPendingDeletion = session
+                                } label: {
+                                    HStack {
+                                        Label("Delete chat", systemImage: "trash")
+                                        Spacer(minLength: 0)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 6)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(6)
+                            .frame(width: 180, alignment: .leading)
+                        }
                     }
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(
-                            isSelected
-                                ? AppPalette.hoverSurface
-                                : (isHovered ? AppPalette.surfaceMuted : Color.clear)
-                        )
-                )
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: OORadius.medium, style: .continuous)
+                    .fill(
+                        isSelected
+                            ? OOColor.currentTint
+                            : (isHovered ? OOColor.hairline : Color.clear)
+                    )
+            )
+            .contentShape(Rectangle())
             .contextMenu {
+                Button("Add chat") {
+                    if let configuration = appViewModel.configuration(for: session) {
+                        appViewModel.createNewSession(for: configuration)
+                    }
+                }
+
                 Button("Rename") {
                     startRenamingSession(session)
                 }
@@ -723,6 +929,7 @@ private extension SidebarView {
                     hoveredSessionId = nil
                 }
             }
+            .animation(.easeInOut(duration: 0.12), value: isHovered)
         }
     }
 
@@ -785,8 +992,8 @@ private extension SidebarView {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(
                         appViewModel.selection == .settings
-                            ? AppPalette.hoverSurface
-                            : (hoveredSettings ? AppPalette.surfaceMuted : Color.clear)
+                            ? OOColor.hover
+                            : (hoveredSettings ? OOColor.surface : Color.clear)
                     )
             )
             .contentShape(Rectangle())
@@ -796,41 +1003,6 @@ private extension SidebarView {
             hoveredSettings = isHovering
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private var usageButton: some View {
-        Button {
-            guard appViewModel.selection != .usage else { return }
-            appViewModel.previousSelection = appViewModel.selection
-            appViewModel.selection = .usage
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "chart.bar.xaxis")
-                    .font(.system(size: AppFontSize.subheadline, weight: .medium))
-                Text("Usage")
-                    .font(.system(size: AppFontSize.body, weight: .semibold))
-                Spacer()
-            }
-            .foregroundColor(.primary)
-            .padding(.horizontal, 10)
-            .frame(height: 38)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(
-                        appViewModel.selection == .usage
-                            ? AppPalette.hoverSurface
-                            : (hoveredUsage ? AppPalette.surfaceMuted : Color.clear)
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering in
-            hoveredUsage = isHovering
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityLabel("Usage")
-        .help("View local model usage")
     }
 
     private var emptyState: some View {
@@ -857,22 +1029,14 @@ private extension SidebarView {
         if appViewModel.selection != .newConfiguration {
             appViewModel.previousSelection = appViewModel.selection
         }
-        appViewModel.selection = .newConfiguration
-    }
-
-    private func statusDotColor(isConnected: Bool) -> Color {
-        if isConnected {
-            return AppPalette.success
-        } else {
-            return AppPalette.error.opacity(0.8)
-        }
+        appViewModel.selection = .chooseAgent
     }
 
     private func rowBackground(isActive: Bool, isHovered: Bool) -> Color {
         if isActive {
-            return AppPalette.hoverSurface
+            return OOColor.hover
         } else if isHovered {
-            return AppPalette.surfaceMuted
+            return OOColor.surface
         } else {
             return Color.clear
         }
