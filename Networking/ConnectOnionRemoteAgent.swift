@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 
@@ -23,7 +24,6 @@ actor ConnectOnionRemoteAgentClient {
     private var webSocketTask: (any ConnectOnionWebSocketTasking)?
     private var pendingRuntimeInputs: [ConnectOnionPendingRuntimeInput] = []
     private var pendingRuntimeMessageIDs: [UUID] = []
-    private var seenEventIDs: Set<String> = []
     private var seenArtifactIDs: Set<String> = []
     private var isAwaitingOnboarding = false
     private var cancelRequested = false
@@ -31,8 +31,14 @@ actor ConnectOnionRemoteAgentClient {
     private var interruptEscalated = false
     private var interruptDeadlineTask: Task<Void, Never>?
     private var canSendControlMessages = false
+    private var pendingAskUserRequestID: String?
+    private var pendingApprovalRequestID: String?
     private var isSending = false
     private var liveLLMModelsByID: [String: String] = [:]
+    private var eventLedger = EventLedger()
+    /// chat_items from the last CONNECTED. The host sends them when its copy of the
+    /// session is newer, which is how a turn that finished while we were away is found.
+    private var connectedChatItems: [[String: Any]]?
 
     init(
         configuredTarget: String,
@@ -52,9 +58,7 @@ actor ConnectOnionRemoteAgentClient {
         self.identityStore = identityStore
         self.urlSession = urlSession
         self.usageRecorder = usageRecorder
-        self.webSocketFactory = webSocketFactory ?? {
-            urlSession.webSocketTask(with: $0)
-        }
+        self.webSocketFactory = webSocketFactory ?? Self.defaultWebSocket(urlSession: urlSession)
         self.sleep = sleep
         sessionStore = ConnectOnionRemoteSessionStore(
             conversationID: conversationID,
@@ -71,6 +75,80 @@ actor ConnectOnionRemoteAgentClient {
         let resolved = try await resolver.resolve(configuredTarget)
         endpoint = resolved
         return resolved
+    }
+
+    /// Opens a temporary authenticated connection to retrieve the agent's profile without sending an INPUT or starting an execution.
+    func loadAgentProfile(
+        onEvent: @escaping EventHandler
+    ) async throws {
+        let target = try await probe()
+        let task = webSocketFactory(target.webSocketURL)
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+
+        task.resume()
+
+        try await sendFrame( try connectFrame(for: target), over: task)
+
+        // An agent that still requires onboarding has no authenticated
+        // profile to show yet. Leave the public agent information in place.
+        guard try await waitForProfileHandshake(over: task) else {
+            return
+        }
+
+        // The host sends AGENT_PROFILE and then the Control Center which O Chat's page gets on open.
+        // They are read in whatever order they arrive and the wait ends once both are in.
+        // Only these two frames and the keepalive PING are handled here.
+        var hasProfile = false
+        var hasSnapshot = false
+        while !(hasProfile && hasSnapshot), let next = try? await receiveJSON(from: task, timeout: 5) {
+            switch next["type"] as? String {
+            case "AGENT_PROFILE":
+                if case .agentProfile(let profile) = OIPServerFrame.decode(next.mapValues { JSONValue(any: $0) }) {
+                    await onEvent(.agentProfile(profile))
+                }
+                hasProfile = true
+            case "DASHBOARD_SNAPSHOT":
+                await emitDashboardSnapshot(next, currentSessionID: sessionState.sessionID, onEvent: onEvent)
+                hasSnapshot = true
+            case "PING":
+                try? await sendFrame(OIPClientFrames.pong(), over: task)
+            default:
+                continue
+            }
+        }
+    }
+
+    private func waitForProfileHandshake(
+        over task: any ConnectOnionWebSocketTasking
+    ) async throws -> Bool {
+        while true {
+            let data = try await receiveFrameData(from: task, timeout: 30)
+            let step: OIPHandshake.Step
+
+            do {
+                step = try OIPHandshake.interpret(data)
+            } catch {
+                throw ConnectOnionRemoteError.invalidProtocolMessage
+            }
+
+            switch step {
+            case .established(let connected):
+                adopt(connected)
+                return true
+
+            case .reply(let frame):
+                try await sendFrame(frame, over: task)
+
+            case .incompatible(let incompatibility):
+                throw ConnectOnionRemoteError.incompatibleProtocol(incompatibility)
+
+            case .rejected, .onboardRequired:
+                return false
+
+            case .onboardSucceeded, .ignore:
+                continue
+            }
+        }
     }
 
     func hasPendingExecution() -> Bool {
@@ -90,7 +168,7 @@ actor ConnectOnionRemoteAgentClient {
         sessionState.desiredMode = mode
 
         if isSending, let task = webSocketTask {
-            try await sendJSON(Self.buildModeChangeMessage(mode), over: task)
+            try await sendFrame(try frames().modeChange(mode.permissionMode), over: task)
         } else {
             storeClientModeRequest(mode)
         }
@@ -121,6 +199,7 @@ actor ConnectOnionRemoteAgentClient {
         let inputID = UUID().uuidString
         sessionState.executionState = .running
         sessionState.activeInputID = inputID
+        sessionState.activePrompt = prompt
         sessionState.inputWasSent = false
         sessionState.wasInterrupted = false
         sessionStore.save(sessionState)
@@ -181,8 +260,8 @@ actor ConnectOnionRemoteAgentClient {
         sessionState.wasInterrupted = true
         sessionStore.save(sessionState)
         if canSendControlMessages, let task = webSocketTask {
-            try await sendJSON(
-                Self.buildInterruptMessage(inputID: sessionState.activeInputID),
+            try await sendFrame(
+                try frames().interrupt(inputID: sessionState.activeInputID),
                 over: task
             )
         }
@@ -196,16 +275,13 @@ actor ConnectOnionRemoteAgentClient {
         task: any ConnectOnionWebSocketTasking,
         endpoint: ConnectOnionResolvedEndpoint
     ) async throws {
-        let identity = try identityStore.loadOrCreateIdentity()
         pendingRuntimeMessageIDs.append(localMessageID)
         do {
-            try await sendJSON(
-                Self.buildInputMessage(
-                    prompt: prompt,
-                    files: files,
+            try await sendFrame(
+                try frames(for: endpoint).input(
                     inputID: UUID().uuidString,
-                    identity: identity,
-                    endpoint: endpoint
+                    prompt: prompt,
+                    files: files.map { JSONValue(any: $0.protocolObject) }
                 ),
                 over: task
             )
@@ -219,10 +295,14 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(
-            ["type": "ASK_USER_RESPONSE", "answer": answer],
+        guard let requestID = pendingAskUserRequestID else {
+            throw ConnectOnionRemoteError.invalidProtocolMessage
+        }
+        try await sendFrame(
+            try frames().askUserResponse(requestID: requestID, answer: answer),
             over: task
         )
+        pendingAskUserRequestID = nil
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -231,7 +311,17 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        guard let requestID = pendingApprovalRequestID else {
+            throw ConnectOnionRemoteError.invalidProtocolMessage
+        }
+        try await sendFrame(
+            try frames().approvalResponse(
+                requestID: requestID,
+                decision: decision.message.mapValues { JSONValue(any: $0) }
+            ),
+            over: task
+        )
+        pendingApprovalRequestID = nil
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -240,7 +330,7 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        try await sendCommand(decision.message, over: task)
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -251,7 +341,10 @@ actor ConnectOnionRemoteAgentClient {
         guard let task = webSocketTask else {
             throw ConnectOnionRemoteError.connectionClosed
         }
-        try await sendJSON(decision.message, over: task)
+        try await sendCommand(
+            ["type": "ULW_RESPONSE"].merging(decision.message) { $1 },
+            over: task
+        )
         sessionState.executionState = .running
         sessionStore.save(sessionState)
     }
@@ -262,20 +355,7 @@ actor ConnectOnionRemoteAgentClient {
             throw ConnectOnionRemoteError.connectionClosed
         }
 
-        let identity = try identityStore.loadOrCreateIdentity()
-        let payload: [String: Any] = [
-            "timestamp": Int(Date().timeIntervalSince1970),
-            "invite_code": code
-        ]
-        try await sendJSON(
-            [
-                "type": "ONBOARD_SUBMIT",
-                "payload": payload,
-                "from": identity.address,
-                "signature": try identity.signature(for: payload)
-            ],
-            over: task
-        )
+        try await sendFrame(try frames().onboardSubmit(inviteCode: code), over: task)
     }
 
     /// Reattaches to a persisted execution after an interrupted run. Recovery
@@ -320,7 +400,94 @@ actor ConnectOnionRemoteAgentClient {
             await onEvent(.output(result))
         } catch {
             guard !sessionState.wasInterrupted else { return }
-            await onEvent(.error(error.localizedDescription))
+            // Unique -32010 incompatible error
+            if let incompatibility = (error as? ConnectOnionRemoteError)?.incompatibility {
+                await onEvent(.incompatible(incompatibility))
+            } else {
+                await onEvent(.error(error.localizedDescription))
+            }
+        }
+    }
+
+    private static let execTimeout: TimeInterval = 30
+
+    /// Runs tool on the host without the LLM (EXEC) and returns the host's EXEC_RESULT.
+    ///
+    /// It uses its own short-lived socket so a slow, failed or refused EXEC cannot disturb a running turn
+    /// or what the next launch recovers.
+    /// Failed tools return `isSuccess == false`. This throws only when
+    /// the round trip itself cannot finish (handshake refused, socket lost, no reply in time).
+    func runExec(
+        execID: String,
+        tool: String,
+        args: [String: JSONValue]
+    ) async throws -> OIPExecResult {
+        let target = try await probe()
+        let task = webSocketFactory(target.webSocketURL)
+        defer { task.cancel(with: .normalClosure, reason: nil) }
+        task.resume()
+
+        let builder = OIPClientFrames(keyStore: identityStore, to: target.agentAddress)
+        try await sendFrame(
+            try builder.connect(direct: target.isDirect, sessionID: nil, session: nil, lastMessageID: nil),
+            over: task
+        )
+        try await waitForExecHandshake(over: task)
+        try await sendFrame(try builder.exec(execID: execID, tool: tool, args: args), over: task)
+        return try await waitForExecResult(execID: execID, over: task)
+    }
+
+    private func waitForExecHandshake(over task: any ConnectOnionWebSocketTasking) async throws {
+        while true {
+            let data = try await receiveFrameData(from: task, timeout: 30)
+            let step: OIPHandshake.Step
+            do {
+                step = try OIPHandshake.interpret(data)
+            } catch {
+                throw ConnectOnionRemoteError.invalidProtocolMessage
+            }
+            switch step {
+            case .established:
+                return
+            case .reply(let frame):
+                try await sendFrame(frame, over: task)
+            case .incompatible(let incompatibility):
+                throw ConnectOnionRemoteError.incompatibleProtocol(incompatibility)
+            case .rejected(let message):
+                throw ConnectOnionRemoteError.server(message)
+            case .onboardRequired:
+                throw ConnectOnionRemoteError.server("This agent needs onboarding first. Send it a message to finish it.")
+            case .onboardSucceeded, .ignore:
+                continue
+            }
+        }
+    }
+
+    /// Reads until the EXEC_RESULT with this exec_id. Other results and unknown frames are skipped.
+    private func waitForExecResult(
+        execID: String,
+        over task: any ConnectOnionWebSocketTasking
+    ) async throws -> OIPExecResult {
+        let deadline = Date().addingTimeInterval(Self.execTimeout)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                throw ConnectOnionRemoteError.timedOut
+            }
+            let data = try await receiveFrameData(from: task, timeout: UInt64(remaining.rounded(.up)))
+            guard let fields = try? JSONDecoder().decode([String: JSONValue].self, from: data) else {
+                continue
+            }
+            switch OIPServerFrame.decode(fields) {
+            case .execResult(let result) where result.execID == execID:
+                return result
+            case .ping:
+                try await sendFrame(OIPClientFrames.pong(), over: task)
+            case .error(let error):
+                throw ConnectOnionRemoteError.server(error.message ?? "The agent refused the request")
+            default:
+                continue
+            }
         }
     }
 
@@ -338,29 +505,35 @@ extension ConnectOnionRemoteAgentClient {
     /// endpoint exists, the final fallback polls the hosted session over HTTP
     /// instead of giving up.
     private func runWithRecovery(
-        _ request: ConnectOnionConnectionRequest,
+        _ firstRequest: ConnectOnionConnectionRequest,
         onUpdate: @escaping UpdateHandler,
         onEvent: @escaping EventHandler
     ) async throws -> String {
+        var request = firstRequest
         var lastError: Error?
 
-        for attempt in 0..<4 {
+        let policy = ReconnectPolicy()
+
+        var state = reduce(.idle, .open, maxAttempts: policy.maxAttempts)
+
+        while case .connecting(let attempt) = state {
             if cancelRequested {
                 throw interruptEscalated
                     ? ConnectOnionRemoteError.interrupted
                     : ConnectOnionRemoteError.cancelled
             }
+
             do {
                 if attempt > 0 {
                     await onUpdate(
                         ConnectOnionTransportUpdate(
-                            status: "Reconnecting",
-                            detail: "Attempt \(attempt + 1) of 4",
+                            status: statusLabel(.connecting(attempt: attempt)),
+                            detail: "Attempt \(attempt + 1) of \(policy.maxAttempts)",
                             isLive: false
                         )
                     )
-                    let delay = UInt64(1 << (attempt - 1)) * 1_000_000_000
-                    try await sleep(delay)
+                    try await sleep(UInt64(policy.delay(for: attempt) * 1_000_000_000))
+                    request = await failedOver(request)
                 }
 
                 return try await runConnection(
@@ -373,6 +546,7 @@ extension ConnectOnionRemoteAgentClient {
             } catch {
                 lastError = error
                 closeSocket()
+                state = reduce(state, .socketClosed, maxAttempts: policy.maxAttempts)
             }
         }
 
@@ -389,6 +563,38 @@ extension ConnectOnionRemoteAgentClient {
         throw lastError ?? ConnectOnionRemoteError.recoveryUnavailable
     }
 
+    /// A direct endpoint that dropped is resolved again, which falls back to the relay when
+    /// the agent still looks reachable there, as iOS does. The same session_id and
+    /// last_msg_id go out in CONNECT, so the host resumes the run. A lookup that fails, or
+    /// one that finds the same socket again, keeps the endpoint the run started on.
+    private func failedOver(_ request: ConnectOnionConnectionRequest) async -> ConnectOnionConnectionRequest {
+        guard request.endpoint.isDirect,
+            let fresh = try? await resolver.resolve(configuredTarget),
+            fresh.webSocketURL != request.endpoint.webSocketURL else {
+                return request
+            }
+        endpoint = fresh
+        return ConnectOnionConnectionRequest(
+            prompt: request.prompt,
+            files: request.files,
+            inputID: request.inputID,
+            identity: request.identity,
+            endpoint: fresh
+        )
+    }
+
+    /// The header's words come from the kit, so macOS and iOS say the same thing.
+    private func statusLabel(
+        _ state: SessionState,
+        hostStatus: String? = nil
+    ) -> String {
+        SessionStatusLabel.text(
+            state: state,
+            hasBookmark: sessionState.lastMessageID != nil,
+            hostStatus: hostStatus
+        )
+    }
+
     private func runConnection(
         _ request: ConnectOnionConnectionRequest,
         onUpdate: @escaping UpdateHandler,
@@ -396,27 +602,37 @@ extension ConnectOnionRemoteAgentClient {
     ) async throws -> String {
         await onUpdate(
             ConnectOnionTransportUpdate(
-                status: "Authenticating",
+                status: statusLabel(.connecting(attempt: 0)),
                 detail: connectionDetail(for: request.endpoint),
                 isLive: false
             )
         )
 
-        let (task, connectedStatus) = try await establishConnection(
+        let (task, established) = try await establishConnection(
             request,
             onUpdate: onUpdate,
             onEvent: onEvent
         )
+        // The INPUT already went out and the host has finished that turn; take the reply
+        // from CONNECTED instead of refusing.
+        if let settled = await settleFinishedTurn(
+            connectedStatus: established.status,
+            endpoint: request.endpoint,
+            onUpdate: onUpdate,
+            onEvent: onEvent
+        ) {
+            return settled
+        }
         try await sendInitialInputIfNeeded(
             request,
-            connectedStatus: connectedStatus,
+            established: established,
             over: task
         )
         try await flushPendingActions(over: task, endpoint: request.endpoint)
         await onUpdate(
             ConnectOnionTransportUpdate(
-                status: "Running",
-                detail: connectedStatus == "running" ? "Resumed session" : nil,
+                status: statusLabel(.connected, hostStatus: "running"),
+                detail: established.isRunning ? "Resumed session" : nil,
                 isLive: true
             )
         )
@@ -432,25 +648,20 @@ extension ConnectOnionRemoteAgentClient {
         _ request: ConnectOnionConnectionRequest,
         onUpdate: @escaping UpdateHandler,
         onEvent: @escaping EventHandler
-    ) async throws -> (any ConnectOnionWebSocketTasking, String) {
+    ) async throws -> (any ConnectOnionWebSocketTasking, OIPConnected) {
         closeSocket()
+        connectedChatItems = nil
         let task = webSocketFactory(request.endpoint.webSocketURL)
         webSocketTask = task
         task.resume()
 
-        try await sendJSON(
-            buildConnectMessage(
-                identity: request.identity,
-                endpoint: request.endpoint
-            ),
-            over: task
-        )
-        let connectedStatus = try await waitForConnected(
+        try await sendFrame(try connectFrame(for: request.endpoint), over: task)
+        let established = try await waitForConnected(
             over: task,
             onUpdate: onUpdate,
             onEvent: onEvent
         )
-        return (task, connectedStatus)
+        return (task, established)
     }
 
     /// Sends INPUT at most once per execution. On a reconnect the server must
@@ -458,24 +669,23 @@ extension ConnectOnionRemoteAgentClient {
     /// than risk resubmitting the task.
     private func sendInitialInputIfNeeded(
         _ request: ConnectOnionConnectionRequest,
-        connectedStatus: String,
+        established: OIPConnected,
         over task: any ConnectOnionWebSocketTasking
     ) async throws {
         if !sessionState.inputWasSent, let prompt = request.prompt {
             sessionState.inputWasSent = true
             sessionState.executionState = .running
             sessionStore.save(sessionState)
-            try await sendJSON(
-                Self.buildInputMessage(
-                    prompt: prompt,
-                    files: request.files,
+
+            try await sendFrame(
+                try frames(for: request.endpoint).input(
                     inputID: request.inputID,
-                    identity: request.identity,
-                    endpoint: request.endpoint
+                    prompt: prompt,
+                    files: request.files.map { JSONValue(any: $0.protocolObject) }
                 ),
                 over: task
             )
-        } else if connectedStatus != "running" {
+        } else if !established.isRunning {
             throw ConnectOnionRemoteError.recoveryUnavailable
         }
     }
@@ -486,8 +696,8 @@ extension ConnectOnionRemoteAgentClient {
     ) async throws {
         canSendControlMessages = true
         if interruptRequested {
-            try await sendJSON(
-                Self.buildInterruptMessage(inputID: sessionState.activeInputID),
+            try await sendFrame(
+                try frames().interrupt(inputID: sessionState.activeInputID),
                 over: task
             )
         }
@@ -539,12 +749,16 @@ extension ConnectOnionRemoteAgentClient {
         guard let eventID = event["id"] as? String else {
             return true
         }
+
         let dedupeKey = Self.eventDedupeKey(for: event, id: eventID)
-        guard seenEventIDs.insert(dedupeKey).inserted else {
+
+        guard eventLedger.record(eventID: dedupeKey) else {
             return false
         }
+
         sessionState.lastMessageID = eventID
         sessionStore.save(sessionState)
+
         return true
     }
 
@@ -565,16 +779,28 @@ extension ConnectOnionRemoteAgentClient {
             )
 
         case "PING":
-            try await sendJSON(["type": "PONG"], over: task)
+            try await sendFrame(OIPClientFrames.pong(), over: task)
+
+        case "DASHBOARD_SNAPSHOT":
+            await emitDashboardSnapshot(event, currentSessionID: sessionState.sessionID, onEvent: onEvent)
+
+        case "AGENT_PROFILE":
+            let fields = event.mapValues { JSONValue(any: $0) }
+
+            if case .agentProfile(let profile) = OIPServerFrame.decode(fields) {
+                await onEvent(.agentProfile(profile))
+            }
 
         case "ERROR":
             try await handleServerError(event, onEvent: onEvent)
 
         case "ask_user":
+            pendingAskUserRequestID = Self.requestID(from: event)
             markWaitingForInteraction()
             await onEvent(.askUser(makeAskUserRequest(from: event)))
 
         case "approval_needed":
+            pendingApprovalRequestID = Self.requestID(from: event)
             markWaitingForInteraction()
             await onEvent(.approvalRequired(makeApprovalRequest(from: event)))
 
@@ -624,6 +850,7 @@ extension ConnectOnionRemoteAgentClient {
             interruptDeadlineTask = nil
             sessionState.executionState = .idle
             sessionState.activeInputID = nil
+            sessionState.activePrompt = nil
             sessionState.inputWasSent = false
             // The cancelled run is now cleanly terminal, so the flag has done
             // its recovery-blocking job. Clear it here or it survives to the
@@ -670,6 +897,72 @@ extension ConnectOnionRemoteAgentClient {
         return framedInputID == sessionState.activeInputID
     }
 
+    /// A turn that finished while this client was away (app quit, socket dropped) is not
+    /// replayed: CONNECTED says "connected" and the turn sits in chat_items. Take its reply
+    /// only if the turn's user message is the prompt we sent. Otherwise return nil, and
+    /// sendInitialInputIfNeeded refuses as before without resending anything.
+    private func settleFinishedTurn(
+        connectedStatus: String,
+        endpoint: ConnectOnionResolvedEndpoint,
+        onUpdate: @escaping UpdateHandler,
+        onEvent: @escaping EventHandler
+    ) async -> String? {
+        // A run the user stopped is never recovered, here or in recoverIfNeeded.
+        guard sessionState.inputWasSent,
+              !sessionState.wasInterrupted,
+              connectedStatus != "running",
+              let prompt = sessionState.activePrompt,
+              let turn = Self.finishedTurn(matching: prompt, in: connectedChatItems),
+              let reply = turn.last(where: { $0["type"] as? String == "agent" })?["content"] as? String,
+              !reply.isEmpty else {
+            return nil
+        }
+        sessionState.executionState = .idle
+        sessionState.activeInputID = nil
+        sessionState.activePrompt = nil
+        sessionState.inputWasSent = false
+        sessionState.wasInterrupted = false
+        sessionStore.save(sessionState)
+        closeSocket()
+        await onEvent(.recoveryState("Recovered completed session"))
+        await onUpdate(
+            ConnectOnionTransportUpdate(
+                status: statusLabel(.connected, hostStatus: "connected"),
+                detail: connectionDetail(for: endpoint),
+                isLive: true
+            )
+        )
+        return reply
+    }
+
+    /// The chat items after the last user message, only when that message is `prompt`.
+    /// nil when there are none, or the last turn belongs to an older message (our INPUT
+    /// never arrived), whose reply must not be shown as this prompt's answer.
+    nonisolated static func finishedTurn(
+        matching prompt: String,
+        in chatItems: [[String: Any]]?
+    ) -> [[String: Any]]? {
+        guard let chatItems else {
+            return nil
+        }
+        var lastUserContent: String?
+        var turn: [[String: Any]] = []
+        for item in chatItems {
+            if item["type"] as? String == "user" {
+                lastUserContent = item["content"] as? String
+                turn.removeAll()
+            } else {
+                turn.append(item)
+            }
+        }
+        let expected = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastUserContent,
+              lastUserContent.trimmingCharacters(in: .whitespacesAndNewlines) == expected else {
+            return nil
+        }
+        return turn
+    }
+
     private func completeOutput(
         _ event: [String: Any],
         endpoint: ConnectOnionResolvedEndpoint,
@@ -690,6 +983,7 @@ extension ConnectOnionRemoteAgentClient {
         saveSession(from: event["session"])
         sessionState.executionState = .idle
         sessionState.activeInputID = nil
+        sessionState.activePrompt = nil
         sessionState.inputWasSent = false
         interruptRequested = false
         // Reaching a normal output is terminal for any in-flight interrupt too;
@@ -699,7 +993,7 @@ extension ConnectOnionRemoteAgentClient {
         closeSocket()
         await onUpdate(
             ConnectOnionTransportUpdate(
-                status: "Connected",
+                status: statusLabel(.connected, hostStatus: "connected"),
                 detail: connectionDetail(for: endpoint),
                 isLive: true
             )
@@ -731,13 +1025,14 @@ extension ConnectOnionRemoteAgentClient {
         onEvent: @escaping EventHandler
     ) async {
         guard let rawMode = event["mode"] as? String,
-              let mode = AgentExecutionMode(rawValue: rawMode) else {
+              let mode = AgentExecutionMode(rawValue: rawMode)
+                ?? AgentExecutionMode(permissionMode: OIPPermissionMode(protocolValue: rawMode)) else {
             return
         }
         sessionState.desiredMode = mode
         sessionState.confirmedMode = mode
         sessionStore.save(sessionState)
-        await onEvent(.modeChanged(mode))
+        await onEvent(.modeChanged(mode, turnsLeft: Self.intValue(event["turns_left"])))
     }
 
     private func handlePlanReview(
@@ -788,7 +1083,7 @@ extension ConnectOnionRemoteAgentClient {
         }
         await onUpdate(
             ConnectOnionTransportUpdate(
-                status: "Running",
+                status: statusLabel(.connected, hostStatus: "running"),
                 detail: "Input queued",
                 isLive: true
             )
@@ -836,42 +1131,52 @@ extension ConnectOnionRemoteAgentClient {
         }
     }
 
+    /// Waits for CONNECTED. The package reads every frame (`OIPHandshake`,`OIPServerFrame`).
+    /// -32010 ends the attempt for good; `incompatibleProtocol` is not retryable
     private func waitForConnected(
         over task: any ConnectOnionWebSocketTasking,
         onUpdate: @escaping UpdateHandler,
         onEvent: @escaping EventHandler
-    ) async throws -> String {
+    ) async throws -> OIPConnected {
         while true {
-            let event = try await receiveJSON(from: task, timeout: 30)
-            switch event["type"] as? String {
-            case "CONNECTED":
-                guard let status = event["status"] as? String,
-                      let sessionID = event["session_id"] as? String else {
-                    throw ConnectOnionRemoteError.invalidProtocolMessage
+            let data = try await receiveFrameData(from: task, timeout: 30)
+            let step: OIPHandshake.Step
+            do {
+                step = try OIPHandshake.interpret(data)
+            } catch {
+                throw ConnectOnionRemoteError.invalidProtocolMessage
+            }
+            switch step {
+            case .established(let connected):
+                adopt(connected)
+                if let modes = connected.sessionModes {
+                    await onEvent(
+                        .sessionModes(
+                            available: modes.availableModes.compactMap {
+                                AgentExecutionMode(permissionMode: $0.id)
+                            },
+                            current: modes.currentMode.flatMap(AgentExecutionMode.init(permissionMode:)),
+                            turnsLeft: modes.turnsLeft
+                        )
+                    )
                 }
-                sessionState.sessionID = sessionID
-                sessionStore.save(sessionState)
-                if event["server_newer"] as? Bool == true {
-                    saveSession(from: event["session"])
-                }
-                return status
+                return connected
 
-            case "PING":
-                try await sendJSON(["type": "PONG"], over: task)
+            case .reply(let frame):
+                try await sendFrame(frame, over: task)
 
-            case "ERROR":
-                let message = (event["message"] as? String)
-                    ?? (event["error"] as? String)
-                    ?? "Authentication failed"
+            case .incompatible(let incompatibility):
+                endExecutionWithoutRecovery()
+                throw ConnectOnionRemoteError.incompatibleProtocol(incompatibility)
+
+            case .rejected(let message):
                 if isAwaitingOnboarding {
                     await onEvent(.error(message))
                     continue
                 }
-                throw ConnectOnionRemoteError.server(
-                    message
-                )
+                throw ConnectOnionRemoteError.server(message)
 
-            case "ONBOARD_REQUIRED":
+            case .onboardRequired(let required):
                 isAwaitingOnboarding = true
                 sessionState.executionState = .waitingInteraction
                 sessionStore.save(sessionState)
@@ -882,16 +1187,43 @@ extension ConnectOnionRemoteAgentClient {
                         isLive: true
                     )
                 )
-                await onEvent(.onboardingRequired(makeOnboardingRequest(from: event)))
+                await onEvent(.onboardingRequired(makeOnboardingRequest(from: required)))
 
-            case "ONBOARD_SUCCESS":
+            case .onboardSucceeded(let message):
                 isAwaitingOnboarding = false
-                let message = (event["message"] as? String) ?? "Access granted"
-                await onEvent(.onboardingSucceeded(message))
+                await onEvent(.onboardingSucceeded(message ?? "Access granted"))
 
-            default:
+            case .ignore:
                 continue
             }
+        }
+    }
+
+    /// The host refused the protocol, so INPUT was never sent and nothing is running.
+    /// Clear the execution, or `recoverIfNeeded` would reconnect at the next launch and hit -32010 again.
+    private func endExecutionWithoutRecovery() {
+        closeSocket()
+        sessionState.executionState = .idle
+        sessionState.activeInputID = nil
+        sessionState.inputWasSent = false
+        sessionStore.save(sessionState)
+    }
+
+    /// Keeps the host's session id, and its copy of the conversation when it is the newer one.
+    /// A different id means the old session is not ours any more; drop transcript.
+    private func adopt(_ connected: OIPConnected) {
+        let asked = sessionState.sessionID
+        if let sessionID = connected.sessionID {
+            sessionState.sessionID = sessionID
+        }
+        sessionStore.save(sessionState)
+        connectedChatItems = connected.chatItems?.compactMap { $0.anyValue as? [String: Any] }
+        if connected.serverNewer {
+            saveSession(from: connected.session.map { JSONValue.object($0).anyValue })
+        } else if connected.replacesSession(asked: asked) {
+            sessionState.sessionData = nil
+            sessionState.lastMessageID = nil
+            sessionStore.save(sessionState)
         }
     }
 
@@ -960,6 +1292,7 @@ extension ConnectOnionRemoteAgentClient {
                 saveSession(from: result["session"])
                 sessionState.executionState = .idle
                 sessionState.activeInputID = nil
+                sessionState.activePrompt = nil
                 sessionState.inputWasSent = false
                 sessionStore.save(sessionState)
                 await onEvent(.recoveryState("Recovered completed session"))
@@ -1254,11 +1587,11 @@ extension ConnectOnionRemoteAgentClient {
         from event: [String: Any]
     ) -> ConnectOnionApprovalRequest {
         let batch = (event["batch_remaining"] as? [Any] ?? [])
-            .map(ConnectOnionJSONValue.init(any:))
+            .map(JSONValue.init(any:))
         return ConnectOnionApprovalRequest(
             id: (event["id"] as? String) ?? UUID().uuidString,
             tool: (event["tool"] as? String) ?? "unknown",
-            arguments: ConnectOnionJSONValue(any: event["arguments"] ?? [:]),
+            arguments: JSONValue(any: event["arguments"] ?? [:]),
             description: event["description"] as? String,
             batchRemaining: batch
         )
@@ -1289,113 +1622,52 @@ extension ConnectOnionRemoteAgentClient {
     }
 
     private func makeOnboardingRequest(
-        from event: [String: Any]
+        from required: OIPOnboardRequired,
+        id: String? = nil
     ) -> ConnectOnionOnboardingRequest {
         ConnectOnionOnboardingRequest(
-            id: (event["id"] as? String)
-                ?? (event["identity"] as? String)
-                ?? UUID().uuidString,
-            methods: event["methods"] as? [String] ?? [],
-            paymentAmount: (event["payment_amount"] as? NSNumber)?.doubleValue,
-            paymentAddress: event["payment_address"] as? String
+            id: id ?? required.identity ?? UUID().uuidString,
+            methods: required.methods,
+            paymentAmount: required.paymentAmount,
+            paymentAddress: required.paymentAddress
         )
     }
 
-    private func buildConnectMessage(
-        identity: ConnectOnionIdentity,
-        endpoint: ConnectOnionResolvedEndpoint
-    ) throws -> [String: Any] {
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let payload: [String: Any] = [
-            "timestamp": timestamp,
-            "to": endpoint.agentAddress
-        ]
-
-        var message: [String: Any] = [
-            "type": "CONNECT",
-            "timestamp": timestamp,
-            "payload": payload,
-            "from": identity.address,
-            "signature": try identity.signature(for: payload)
-        ]
-
-        if !endpoint.isDirect {
-            message["to"] = endpoint.agentAddress
+    /// ONBOARD_REQUIRED inside a running turn. Same frame, same decoder as in the handshake.
+    private func makeOnboardingRequest(
+        from event: [String: Any]
+    ) -> ConnectOnionOnboardingRequest {
+        if let fields = JSONValue(any: event).objectValue,
+           case .onboardRequired(let required) = OIPServerFrame.decode(fields) {
+            return makeOnboardingRequest(from: required, id: event["id"] as? String)
         }
-        if let sessionID = sessionState.sessionID {
-            message["session_id"] = sessionID
-        }
-        if let sessionData = sessionState.sessionData,
-           let session = try? JSONSerialization.jsonObject(with: sessionData) {
-            message["session"] = session
-        }
-        if let lastMessageID = sessionState.lastMessageID {
-            message["last_msg_id"] = lastMessageID
-        }
-        return message
+        return ConnectOnionOnboardingRequest(id: UUID().uuidString, methods: [], paymentAmount: nil, paymentAddress: nil)
     }
 
-    nonisolated static func buildInputMessage(
-        prompt: String,
-        files: [ConnectOnionInputFile],
-        inputID: String,
-        identity: ConnectOnionIdentity,
-        endpoint: ConnectOnionResolvedEndpoint
-    ) throws -> [String: Any] {
-        let timestamp = Int(Date().timeIntervalSince1970)
-        var payload: [String: Any] = [
-            "prompt": prompt,
-            "timestamp": timestamp
-        ]
-
-        var message: [String: Any] = [
-            "type": "INPUT",
-            "input_id": inputID,
-            "prompt": prompt,
-            "timestamp": timestamp
-        ]
-        if !files.isEmpty {
-            message["files"] = files.map(\.protocolObject)
-        }
-
-        if !endpoint.isDirect {
-            payload["to"] = endpoint.agentAddress
-            message["to"] = endpoint.agentAddress
-        }
-
-        message["payload"] = payload
-        message["from"] = identity.address
-        message["signature"] = try identity.signature(for: payload)
-        return message
+    /// Builds CONNECT frame for this endpoint, with saved session so reconnection resumes.
+    /// Session decoded with JSONDecover so stored 0,1 stay as a number (not bool)
+    private func connectFrame(
+        for endpoint: ConnectOnionResolvedEndpoint
+    ) throws -> [String: JSONValue] {
+        // While settling an INPUT that already went out, send no turn history. The host then
+        // counts its own copy as newer and returns chat_items, so a turn that finished while
+        // we were away can be read back. Otherwise read back with JSONDecoder, not
+        // JSONValue(any:), so a stored 0 or 1 stays a number.
+        let session = sessionState.inputWasSent
+            ? nil
+            : sessionState.sessionData.flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
+        return try frames(for: endpoint).connect(
+            direct: endpoint.isDirect,
+            sessionID: sessionState.sessionID,
+            session: session,
+            lastMessageID: sessionState.lastMessageID
+        )
     }
 
-    nonisolated static func buildModeChangeMessage(
-        _ mode: AgentExecutionMode
-    ) -> [String: Any] {
-        var message: [String: Any] = [
-            "type": "mode_change",
-            "mode": mode.rawValue
-        ]
-        if mode == .accept {
-            message["turns"] = AgentExecutionMode.acceptTurns
-        }
-        return message
-    }
-
-    nonisolated static func buildInterruptMessage(
-        inputID: String?
-    ) -> [String: Any] {
-        var message: [String: Any] = [
-            "type": "INTERRUPT",
-            "requested_at_ms": Int(Date().timeIntervalSince1970 * 1_000)
-        ]
-        // Naming the run we are interrupting lets the peer echo it back, so a
-        // stale ack/complete for an abandoned run can be told apart from this
-        // turn's own frames by identity rather than by timing alone.
-        if let inputID {
-            message["input_id"] = inputID
-        }
-        return message
+    /// Returns the id of an agent's question/approval event; `request_id` or `id`.
+    /// User reply must have identical id to the prompt, otherwise dropped by host.
+    nonisolated static func requestID(from event: [String: Any]) -> String? {
+        (event["request_id"] as? String) ?? (event["id"] as? String)
     }
 
     private func storeClientModeRequest(_ mode: AgentExecutionMode) {
@@ -1435,6 +1707,46 @@ extension ConnectOnionRemoteAgentClient {
         sessionStore.save(sessionState)
     }
 
+    /// A frame builder for one agent. Signing key from identity store, recipient from `target`
+    /// or current connection. Throws if no connection for recipient.
+    private func frames(for target: ConnectOnionResolvedEndpoint? = nil) throws -> OIPClientFrames {
+        guard let target = target ?? endpoint else {
+            throw ConnectOnionRemoteError.connectionClosed
+        }
+        return OIPClientFrames(keyStore: identityStore, to: target.agentAddress)
+    }
+
+    /// Sends the commands with no named builder in the package (plan_review, ULW_RESPONSE)
+    /// The dictionary's `type` becomes the command type, then removed from fields since the signer
+    /// owns it; since fields that set signer-owned values are rejected.
+    private func sendCommand(
+        _ object: [String: Any],
+        over task: any ConnectOnionWebSocketTasking
+    ) async throws {
+        guard let type = object["type"] as? String else {
+            throw ConnectOnionRemoteError.invalidProtocolMessage
+        }
+
+        var fields = object.mapValues { JSONValue(any: $0) }
+        fields["type"] = nil
+
+        try await sendFrame(
+            try frames().command(type: type, fields: fields),
+            over: task
+        )
+    }
+
+    /// Convert built and signed frame (by OIPClientFrames) to dictionary type for `sendJSON`.
+    /// Never signs, last step before network.
+    private func sendFrame(
+        _ frame: [String: JSONValue],
+        over task: any ConnectOnionWebSocketTasking
+    ) async throws {
+        try await sendJSON(frame.mapValues {$0.anyValue}, over: task)
+    }
+
+    // JSONSerialisation here is fine.
+    // Writes a frame to the socket. Already signed, so serialization details do not affect signature.
     private func sendJSON(
         _ object: [String: Any],
         over task: any ConnectOnionWebSocketTasking
@@ -1453,6 +1765,18 @@ extension ConnectOnionRemoteAgentClient {
         from task: any ConnectOnionWebSocketTasking,
         timeout: UInt64
     ) async throws -> [String: Any] {
+        let data = try await receiveFrameData(from: task, timeout: timeout)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ConnectOnionRemoteError.invalidProtocolMessage
+        }
+        return object
+    }
+
+    /// One received frame, undecoded. The handshake hands it to `OIPHandshake`.
+    private func receiveFrameData(
+        from task: any ConnectOnionWebSocketTasking,
+        timeout: UInt64
+    ) async throws -> Data {
         let message = try await withThrowingTaskGroup(
             of: URLSessionWebSocketTask.Message.self
         ) { group in
@@ -1461,6 +1785,7 @@ extension ConnectOnionRemoteAgentClient {
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: timeout * 1_000_000_000)
+                task.cancel(with: .goingAway, reason: nil)
                 throw ConnectOnionRemoteError.timedOut
             }
 
@@ -1480,11 +1805,7 @@ extension ConnectOnionRemoteAgentClient {
         @unknown default:
             throw ConnectOnionRemoteError.invalidProtocolMessage
         }
-
-        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ConnectOnionRemoteError.invalidProtocolMessage
-        }
-        return object
+        return data
     }
 
     private func closeSocket() {
@@ -1529,6 +1850,7 @@ extension ConnectOnionRemoteAgentClient {
         interruptRequested = false
         sessionState.executionState = .idle
         sessionState.activeInputID = nil
+        sessionState.activePrompt = nil
         sessionState.inputWasSent = false
         // Escalation forces the run terminal; drop the flag with it so a later
         // turn is not left muted by a stale interrupt marker.
@@ -1542,6 +1864,9 @@ extension ConnectOnionRemoteAgentClient {
 /// transport for the real actor.
 nonisolated protocol ConnectOnionRemoteAgentProviding: AnyObject, Sendable {
     func probe() async throws -> ConnectOnionResolvedEndpoint
+    func loadAgentProfile(
+        onEvent: @escaping ConnectOnionRemoteAgentClient.EventHandler
+    ) async throws
     func hasPendingExecution() async -> Bool
     func executionModeSnapshot() async -> (
         desired: AgentExecutionMode,
@@ -1571,7 +1896,20 @@ nonisolated protocol ConnectOnionRemoteAgentProviding: AnyObject, Sendable {
         onUpdate: @escaping ConnectOnionRemoteAgentClient.UpdateHandler,
         onEvent: @escaping ConnectOnionRemoteAgentClient.EventHandler
     ) async
+    func runExec(
+        execID: String,
+        tool: String,
+        args: [String: JSONValue]
+    ) async throws -> OIPExecResult
     func disconnect() async
+}
+
+extension ConnectOnionRemoteAgentProviding {
+    func loadAgentProfile(
+        onEvent: @escaping ConnectOnionRemoteAgentClient.EventHandler
+    ) async throws {
+        // Default no-op for injected test transports that don't load profiles.
+    }
 }
 
 /// The production client satisfies the facade without any adaptation.
@@ -1595,6 +1933,7 @@ nonisolated enum ConnectOnionRemoteError: LocalizedError {
     case interrupted
     case interactionRequired(String)
     case server(String)
+    case incompatibleProtocol(OIPHandshake.Incompatibility)
 
     var isRetryable: Bool {
         switch self {
@@ -1603,6 +1942,14 @@ nonisolated enum ConnectOnionRemoteError: LocalizedError {
         default:
             return false
         }
+    }
+
+    /// Set only for -32010. The view model shows the Incompatible screen when it is non-nil.
+    var incompatibility: OIPHandshake.Incompatibility? {
+        if case .incompatibleProtocol(let value) = self {
+            return value
+        }
+        return nil
     }
 
     var errorDescription: String? {
@@ -1635,6 +1982,8 @@ nonisolated enum ConnectOnionRemoteError: LocalizedError {
             return "The hosted agent stopped the request"
         case .interactionRequired(let message), .server(let message):
             return message
+        case .incompatibleProtocol(let incompatibility):
+            return incompatibility.message
         }
     }
 }

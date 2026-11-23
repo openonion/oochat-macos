@@ -328,11 +328,11 @@ extension ViewModelsTests {
         }
 
         XCTAssertEqual(
-            BalanceAndAddressView.formattedBalance(fractionalBalance),
+            BalanceView.formattedBalance(fractionalBalance),
             "4.23"
         )
         XCTAssertEqual(
-            BalanceAndAddressView.formattedBalance(groupedBalance),
+            BalanceView.formattedBalance(groupedBalance),
             "1,234.57"
         )
     }
