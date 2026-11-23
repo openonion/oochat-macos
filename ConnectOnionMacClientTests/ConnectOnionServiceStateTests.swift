@@ -19,7 +19,7 @@ extension ConnectOnionServiceTests {
 
             XCTAssertFalse(service.isConnected)
             XCTAssertNil(service.connectionError)
-            XCTAssertEqual(service.hostedAgentStatus, "Disconnected")
+            XCTAssertEqual(service.hostedAgentStatus, "Not Connected")
             XCTAssertNil(service.hostedAgentStatusDetail)
             XCTAssertFalse(service.isHostedAgentStatusLive)
             XCTAssertFalse(service.hostedFilesystemEnabled)
@@ -490,11 +490,18 @@ extension ConnectOnionServiceTests {
         service.confirmedExecutionMode = .safe
         XCTAssertEqual(viewModel.desiredExecutionMode, .plan)
         XCTAssertEqual(viewModel.confirmedExecutionMode, .safe)
+        XCTAssertTrue(viewModel.isExecutionModeChangePending, "pending while idle too, until mode_changed")
+        service.confirmedExecutionMode = .plan
         XCTAssertFalse(viewModel.isExecutionModeChangePending)
 
-        service.isAgentRequestActive = true
-        XCTAssertTrue(viewModel.isExecutionModeChangePending)
-        service.isAgentRequestActive = false
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan], "accept hidden until the host lists it")
+        service.availableExecutionModes = [.safe, .plan, .accept]
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan, .accept])
+
+        service.acceptTurnsLeft = 3
+        XCTAssertNil(viewModel.acceptTurnsLeft, "turns left only shows in accept")
+        service.confirmedExecutionMode = .accept
+        XCTAssertEqual(viewModel.acceptTurnsLeft, 3)
 
         let plan = ConnectOnionPlanReviewRequest(id: "plan-1", content: "# Plan")
         viewModel.handleIncomingEvent(.planReviewRequired(plan))
@@ -550,4 +557,112 @@ extension ConnectOnionServiceTests {
         XCTAssertEqual(savedMessages.last?.usage, usage)
     }
 
+    // MARK: - Tool row states
+
+    // The host announces the tool, then asks permission. Until you answer, it isn't running.
+    @MainActor
+    func testToolWaitingOnItsApprovalCardIsAwaitingApproval() {
+        let chat = makeToolChat()
+
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.approvalRequired(touchApproval))
+
+        XCTAssertEqual(chat.toolAwaitingApprovalID, "tool-touch")
+    }
+
+    // The host reports a skipped tool as an error ("User rejected…"); you chose it, so it's Skipped.
+    @MainActor
+    func testSkippedToolStaysSkippedWhenTheHostReportsItAsAnError() {
+        let chat = makeToolChat()
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.approvalRequired(touchApproval))
+
+        chat.submitApproval(.rejectSoft(feedback: ""))
+        chat.handleIncomingEvent(.executionItem(.toolCall(
+            touchTool(status: .error, result: "Error: User rejected tool 'bash'.")
+        )))
+        chat.handleIncomingEvent(.output("Skipped it."))
+
+        XCTAssertEqual(toolStatuses(in: chat), [.skipped])
+        XCTAssertNil(chat.toolAwaitingApprovalID)
+    }
+
+    // Stop while a tool runs: it never finishes, so it must not show as done.
+    @MainActor
+    func testToolRunningWhenYouStopIsInterrupted() {
+        let chat = makeToolChat()
+        chat.service.isAgentRequestActive = true
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+
+        chat.interruptAgent()
+
+        XCTAssertEqual(toolStatuses(in: chat), [.interrupted])
+    }
+
+    // After you stop a batch, the host sends the rest of it no result, but the reply still comes.
+    @MainActor
+    func testToolsLeftWithoutAResultWhenTheReplyArrivesAreInterrupted() {
+        let chat = makeToolChat()
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.executionItem(.toolCall(ToolCallExecutionItem(
+            id: "tool-echo",
+            name: "bash",
+            args: ["command": .string("echo hi")],
+            status: .running,
+            result: nil,
+            timingMS: nil
+        ))))
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .done, result: ""))))
+
+        chat.handleIncomingEvent(.output("Stopped as you asked."))
+
+        XCTAssertEqual(toolStatuses(in: chat), [.done, .interrupted])
+    }
+
+    private var touchApproval: ConnectOnionApprovalRequest {
+        ConnectOnionApprovalRequest(
+            id: "approval-touch",
+            tool: "bash",
+            arguments: .object(["command": .string("touch a.txt")]),
+            description: nil,
+            batchRemaining: []
+        )
+    }
+
+    private func touchTool(status: ExecutionStatus, result: String? = nil) -> ToolCallExecutionItem {
+        ToolCallExecutionItem(
+            id: "tool-touch",
+            name: "bash",
+            args: ["command": .string("touch a.txt")],
+            status: status,
+            result: result,
+            timingMS: nil
+        )
+    }
+
+    @MainActor
+    private func toolStatuses(in chat: ChatViewModel) -> [ExecutionStatus] {
+        (chat.executionRuns.last?.items ?? []).compactMap { item in
+            guard case .toolCall(let toolCall) = item else { return nil }
+            return toolCall.status
+        }
+    }
+
+    @MainActor
+    private func makeToolChat() -> ChatViewModel {
+        let configuration = GeneralAgentConfiguration(
+            name: "Main Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(
+                agentAddress: "0x" + String(repeating: "49", count: 32)
+            )
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Tools")
+        return ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: AppViewModel(storage: makeIsolatedDefaults())
+        )
+    }
 }

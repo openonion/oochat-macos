@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import XCTest
+import ConnectOnionKit
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionServiceTests {
@@ -235,7 +236,7 @@ extension ConnectOnionServiceTests {
         switch event {
         case .output(let value):
             return "output:\(value)"
-        case .modeChanged(let value):
+        case .modeChanged(let value, _):
             return "mode:\(value.rawValue)"
         case .error(let value):
             return "error:\(value)"
@@ -298,5 +299,248 @@ extension ConnectOnionServiceTests {
 
     private enum HexError: Error {
         case invalid
+    }
+}
+
+// Opening a chat shows the host's Control Center before anything is sent, as O Chat does.
+extension ConnectOnionServiceTests {
+    @MainActor
+    func testOpeningAChatShowsTheHostsControlCenterBeforeAnyMessage() async throws {
+        let socketURL = try XCTUnwrap(URL(string: "wss://agent.test/ws"))
+        let address = "0x" + String(repeating: "c1", count: 32)
+        let stub = await StubRemoteAgentClient(
+            endpoint: ConnectOnionResolvedEndpoint(
+                agentAddress: address,
+                webSocketURL: socketURL,
+                httpBaseURL: nil,
+                isDirect: false,
+                info: nil
+            )
+        )
+        await stub.setProfileVisitEvents([.dashboard(.page(html: "<main>starter</main>"))])
+
+        let configuration = GeneralAgentConfiguration(
+            name: "Starter Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        let viewModel = ChatViewModel(
+            session: ChatSession(agentConfigId: configuration.id, title: "Starter"),
+            configuration: configuration,
+            service: ConnectOnionService(remoteAgentFactory: { _, _, _ in stub }),
+            appViewModel: AppViewModel(storage: makeIsolatedDefaults())
+        )
+
+        viewModel.connectIfNeeded() // what ChatView.onAppear does when the chat opens
+        await waitUntil { viewModel.dashboard != nil }
+
+        XCTAssertEqual(viewModel.dashboard, .page(html: "<main>starter</main>"))
+        XCTAssertTrue(viewModel.messages.isEmpty, "no turn was needed")
+    }
+
+    // A Control Center button's line, already checked by the kit pane, is a normal visible turn.
+    @MainActor
+    func testAControlCenterSkillIsSentAsAMessageAndKeepsTheDraft() async throws {
+        let socketURL = try XCTUnwrap(URL(string: "wss://agent.test/ws"))
+        let address = "0x" + String(repeating: "c2", count: 32)
+        let stub = await StubRemoteAgentClient(
+            endpoint: ConnectOnionResolvedEndpoint(
+                agentAddress: address,
+                webSocketURL: socketURL,
+                httpBaseURL: nil,
+                isDirect: false,
+                info: nil
+            )
+        )
+
+        let configuration = GeneralAgentConfiguration(
+            name: "Skill Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        let viewModel = ChatViewModel(
+            session: ChatSession(agentConfigId: configuration.id, title: "Skills"),
+            configuration: configuration,
+            service: ConnectOnionService(remoteAgentFactory: { _, _, _ in stub }),
+            appViewModel: AppViewModel(storage: makeIsolatedDefaults())
+        )
+
+        viewModel.inputText = "half a thought"
+        viewModel.runControlCenterSkill("/deploy to staging")
+
+        XCTAssertEqual(viewModel.messages.map(\.content), ["/deploy to staging"])
+        XCTAssertEqual(viewModel.messages.first?.role, .user)
+        XCTAssertEqual(viewModel.inputText, "half a thought")
+    }
+
+    // A press while the host waits on an approval or an answer must leave that card alone: sending would
+    // clear it and the turn would stall until Stop.
+    @MainActor
+    func testAControlCenterSkillIsIgnoredWhileAnInteractionIsPending() async throws {
+        let socketURL = try XCTUnwrap(URL(string: "wss://agent.test/ws"))
+        let address = "0x" + String(repeating: "c3", count: 32)
+        let stub = await StubRemoteAgentClient(
+            endpoint: ConnectOnionResolvedEndpoint(
+                agentAddress: address,
+                webSocketURL: socketURL,
+                httpBaseURL: nil,
+                isDirect: false,
+                info: nil
+            )
+        )
+        let configuration = GeneralAgentConfiguration(
+            name: "Skill Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        let viewModel = ChatViewModel(
+            session: ChatSession(agentConfigId: configuration.id, title: "Skills"),
+            configuration: configuration,
+            service: ConnectOnionService(remoteAgentFactory: { _, _, _ in stub }),
+            appViewModel: AppViewModel(storage: makeIsolatedDefaults())
+        )
+
+        let approval = ConnectOnionApprovalRequest(
+            id: "deploy-approval",
+            tool: "deploy",
+            arguments: .object([:]),
+            description: "Deploy to staging",
+            batchRemaining: []
+        )
+        viewModel.pendingInteraction = .approval(approval)
+        viewModel.runControlCenterSkill("/deploy to staging")
+        XCTAssertEqual(viewModel.pendingInteraction, .approval(approval))
+        XCTAssertTrue(viewModel.messages.isEmpty)
+
+        let question = ConnectOnionAskUserRequest(
+            id: "which-env",
+            question: "Which environment?",
+            options: ["staging", "production"],
+            multiSelect: false,
+            fields: []
+        )
+        viewModel.pendingInteraction = .askUser(question)
+        viewModel.runControlCenterSkill("/deploy to staging")
+        XCTAssertEqual(viewModel.pendingInteraction, .askUser(question))
+        XCTAssertTrue(viewModel.messages.isEmpty)
+
+        viewModel.pendingInteraction = nil
+        viewModel.service.isInterruptRequested = true
+        viewModel.runControlCenterSkill("/deploy to staging")
+        viewModel.inputText = "typed while stopping"
+        viewModel.sendMessage()
+        XCTAssertTrue(viewModel.messages.isEmpty)
+        XCTAssertEqual(viewModel.inputText, "typed while stopping")
+
+        viewModel.service.isInterruptRequested = false
+        viewModel.runControlCenterSkill("/deploy to staging")
+        XCTAssertEqual(viewModel.messages.map(\.content), ["/deploy to staging"])
+    }
+
+    @MainActor
+    func testNewChatOnAStationReopensItsOneSession() {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        var configuration = GeneralAgentConfiguration(
+            name: "Station",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x" + String(repeating: "7a", count: 32))
+        )
+        configuration.isClaudeStation = true
+        appViewModel.configurations = [configuration]
+        appViewModel.createNewSession(for: configuration)
+        appViewModel.selection = nil
+        appViewModel.createNewSession(for: configuration)
+
+        XCTAssertEqual(appViewModel.sessions.count, 1)
+        XCTAssertEqual(appViewModel.selection, .session(appViewModel.sessions[0].id))
+    }
+
+    @MainActor
+    func testStationRefusalMakesAStationAndNothingIsSentToIt() {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        let configuration = GeneralAgentConfiguration(
+            name: "Station",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x" + String(repeating: "79", count: 32))
+        )
+        appViewModel.configurations = [configuration]
+        appViewModel.createNewSession(for: configuration)
+        appViewModel.createNewSession(for: configuration)
+        XCTAssertEqual(appViewModel.sessions.count, 1)
+        let session = appViewModel.sessions[0]
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: appViewModel
+        )
+        XCTAssertFalse(viewModel.isStation)
+
+        let refusal = OIPServerFrame.decode([
+            "type": .string("ERROR"), "code": .string("provider_station_only"), "message": .string("Station only")
+        ])
+        viewModel.handleIncomingEvent(.workRoomFrame(refusal))
+        viewModel.handleIncomingEvent(.stationRefusedChat)
+
+        XCTAssertTrue(viewModel.isStation)
+        XCTAssertTrue(appViewModel.configurations[0].isClaudeStation)
+        XCTAssertTrue(viewModel.messages.isEmpty)
+        XCTAssertNil(viewModel.interactionError)
+        viewModel.inputText = "hello"
+        viewModel.sendMessage()
+        XCTAssertTrue(viewModel.messages.isEmpty)
+    }
+
+    @MainActor
+    func testAnOrdinaryErrorOnAStationIsStillShown() {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        var configuration = GeneralAgentConfiguration(
+            name: "Station",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x" + String(repeating: "78", count: 32))
+        )
+        configuration.isClaudeStation = true
+        appViewModel.configurations = [configuration]
+        appViewModel.createNewSession(for: configuration)
+        let session = appViewModel.sessions[0]
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: appViewModel
+        )
+        XCTAssertTrue(viewModel.isStation)
+
+        viewModel.handleIncomingEvent(.error("The ConnectOnion agent is offline"))
+
+        XCTAssertEqual(viewModel.interactionError, "The ConnectOnion agent is offline")
+        XCTAssertFalse(viewModel.messages.isEmpty)
+    }
+
+    @MainActor
+    func testStationPaneCodeIsRememberedAndRestartsTheConnection() {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        let configuration = GeneralAgentConfiguration(
+            name: "Station",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x" + String(repeating: "7a", count: 32))
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Station")
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: appViewModel
+        )
+        let request = ConnectOnionOnboardingRequest(id: "o", methods: ["invite_code"], paymentAmount: nil, paymentAddress: nil)
+        viewModel.handleIncomingEvent(.onboardingRequired(request))
+        XCTAssertTrue(viewModel.isStationAwaitingCode)
+
+        viewModel.submitStationCode("  code-1 ")
+
+        XCTAssertEqual(viewModel.stationInviteCode, "code-1")
+        XCTAssertEqual(viewModel.stationOnboardingAttempt, 1)
+        XCTAssertFalse(viewModel.isStationAwaitingCode)
+        XCTAssertFalse(viewModel.workRooms.stationPairing.needsCode)
     }
 }

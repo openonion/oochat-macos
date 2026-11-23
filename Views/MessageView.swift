@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ConnectOnionKit
 
 struct MessageView: View {
     private let messageSpacing: CGFloat = 10
@@ -12,6 +13,10 @@ struct MessageView: View {
     let canRetry: Bool
     let artifactStore: GeneratedArtifactStore
     let onRetry: () -> Void
+    /// Why this message wasn't sent, when the app still knows.
+    var failure: ChatFailure?
+    var canRetryFailedMessage = false
+    var onRetryFailedMessage: () -> Void = {}
 
     @State private var isHovered = false
     @State private var didCopy = false
@@ -58,7 +63,9 @@ struct MessageView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                         .frame(maxWidth: .infinity, alignment: .trailing)
 
-                    if message.status != .sent {
+                    if message.status == .error {
+                        failedStatus
+                    } else if message.status != .sent {
                         Text(messageStatusText)
                             .font(.caption2)
                             .foregroundColor(message.status == .error ? AppPalette.error : .secondary)
@@ -123,6 +130,7 @@ struct MessageView: View {
                 Spacer()
                 Text(message.content)
                     .font(.system(size: fontSize - 2))
+
                     .foregroundColor(.secondary)
                     .padding(8)
                     .background(Capsule().fill(Color.secondary.opacity(0.1)))
@@ -148,9 +156,10 @@ struct MessageView: View {
                             .font(.system(size: AppFontSize.footnote, weight: .medium))
                     }
                 }
+                // editing the size of copy button based on UI feedback
                 .foregroundStyle(didCopy ? AppPalette.success : Color.secondary)
-                .frame(height: 20)
-                .padding(.horizontal, 5)
+                .frame(minWidth: 28, minHeight: 28)
+                .padding(.horizontal, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -168,9 +177,10 @@ struct MessageView: View {
                                 )
                             )
                     }
+                    // edit retry button based on UI feedback.
                     .foregroundStyle(Color.secondary)
-                    .frame(height: 20)
-                    .padding(.horizontal, 5)
+                    .frame(minWidth: 28, minHeight: 28)
+                    .padding(.horizontal, 6)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -180,7 +190,8 @@ struct MessageView: View {
                 .help(canRetry ? "Retry" : "Retry unavailable")
             }
         }
-        .frame(height: 20)
+        // adjust row container to account for larger UI buttons.
+        .frame(height: 28)
         .opacity(isHovered || didCopy ? 1 : 0)
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .onHover(perform: updateHover)
@@ -234,7 +245,34 @@ struct MessageView: View {
         case .sent:
             return ""
         case .error:
-            return "Not delivered"
+            return "Not sent"
+        }
+    }
+
+    /// "Not sent · Retry", then why. Hover the reason for the original error text.
+    private var failedStatus: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            HStack(spacing: 6) {
+                Label("Not sent", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundColor(AppPalette.error)
+                if canRetryFailedMessage {
+                    Button("Retry", action: onRetryFailedMessage)
+                        .buttonStyle(.plain)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(OOColor.primary)
+                        .accessibilityLabel("Retry sending message")
+                }
+            }
+            if let failure {
+                let reason = failure.sentence(agentName: agentConfiguration.name)
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundStyle(OOColor.inkSecondary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(failure.details ?? reason)
+            }
         }
     }
 }

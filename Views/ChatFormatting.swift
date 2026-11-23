@@ -1,4 +1,22 @@
+import ConnectOnionKit
 import SwiftUI
+
+/// One drawn step of a run: an execution row, or the Work Room Card standing
+/// where a Provider Invocation's outer tool call was.
+enum ChatTraceEntry: Identifiable {
+    case item(ExecutionItem)
+    case workRoom(WorkRoom)
+    case finishedSteps(id: String, steps: [ToolCallExecutionItem])
+
+    /// A card keeps its tool call's id, so it holds that place in the run.
+    var id: String {
+        switch self {
+        case .item(let item): item.id
+        case .workRoom(let workRoom): workRoom.toolCallID
+        case .finishedSteps(let id, _): id
+        }
+    }
+}
 
 enum ChatViewPresentation {
     static func hasStartedConversation(_ messages: [ChatMessage]) -> Bool {
@@ -48,10 +66,102 @@ enum ChatViewPresentation {
             return item.id == finalMetadataID
         }
     }
+
+    /// The collapsed trace with each Provider Invocation's outer tool call swapped
+    /// for its Work Room Card; continuation tool calls are dropped.
+    static func traceEntries(_ items: [ExecutionItem], workRooms: WorkRoomStore) -> [ChatTraceEntry] {
+        var entries: [ChatTraceEntry] = []
+        var pending: [ToolCallExecutionItem] = []
+
+        func flush() {
+            if pending.count >= minimumFinishedStepGroupSize, let first = pending.first {
+                // Keyed on the first step so expansion state survives new steps streaming in.
+                entries.append(.finishedSteps(id: "steps-\(first.id)", steps: pending))
+            } else {
+                entries.append(contentsOf: pending.map { .item(.toolCall($0)) })
+            }
+            pending.removeAll()
+        }
+
+        for item in collapsedTraceItems(items) {
+            guard case .toolCall(let call) = item else {
+                flush()
+                entries.append(.item(item))
+                continue
+            }
+
+            if let workRoom = workRooms.workRoom(forToolCallID: call.id) {
+                flush()
+                entries.append(.workRoom(workRoom))
+                continue
+            }
+
+            if workRooms.isProviderToolCall(call.id) {
+                continue
+            }
+
+            if call.isCleanlyFinished {
+                pending.append(call)
+            } else {
+                flush()
+                entries.append(.item(item))
+            }
+        }
+        flush()
+        return entries
+    }
 }
 
-/// Formats token, cost, and context usage for compact status labels.
+extension ChatViewPresentation {
+    /// A single finished step is no shorter as a disclosure, so only runs of
+    /// this size or more are grouped.
+    static let minimumFinishedStepGroupSize = 2
 
+    static func groupedTraceEntries(_ items: [ExecutionItem]) -> [ChatTraceEntry] {
+        var entries: [ChatTraceEntry] = []
+        var pending: [ToolCallExecutionItem] = []
+
+        func flush() {
+            if pending.count >= minimumFinishedStepGroupSize, let first = pending.first {
+                // Keyed on the first step so expansion state survives new steps streaming in.
+                entries.append(.finishedSteps(id: "steps-\(first.id)", steps: pending))
+            } else {
+                entries.append(contentsOf: pending.map { .item(.toolCall($0)) })
+            }
+            pending.removeAll()
+        }
+
+        for item in items {
+            if case .toolCall(let call) = item, call.isCleanlyFinished {
+                pending.append(call)
+            } else {
+                flush()
+                entries.append(.item(item))
+            }
+        }
+        flush()
+        return entries
+    }
+
+    /// "Ran 9 steps · 3.6 s". The time is the sum of the steps' own timings and is
+    /// omitted when it rounds to zero.
+    static func finishedStepsSummary(_ steps: [ToolCallExecutionItem]) -> String {
+        var text = "Ran \(steps.count) step\(steps.count == 1 ? "" : "s")"
+        let totalMS = steps.compactMap(\.timingMS).reduce(0, +)
+        if totalMS >= 50 {
+            let seconds = totalMS / 1_000
+            if seconds < 10 {
+                text += String(format: " · %.1f s", seconds)
+            } else if seconds < 60 {
+                text += String(format: " · %.0f s", seconds)
+            } else {
+                text += " · \(Int(seconds) / 60) m \(Int(seconds) % 60) s"
+            }
+        }
+        return text
+    }
+}
+/// Formats token, cost, and context usage for compact status labels.
 enum ChatUsageFormatter {
     static func tokenText(for usage: ChatUsageSummary) -> String {
         let tokens = Double(usage.tokenCount)

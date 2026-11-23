@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import UniformTypeIdentifiers
+import ConnectOnionKit
 
 /// Drives a single conversation: transcript, composer, attachments, voice
 /// input, and runtime interactions, all mirrored into the shared AppViewModel
@@ -10,19 +11,34 @@ class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var executionItems: [ExecutionItem] = []
     @Published var executionRuns: [ExecutionRun] = []
-    @Published var inputText: String = ""
+    @Published var inputText: String = "" {
+        didSet { appViewModel.setDraft(inputText, for: session.id) }
+    }
     @Published var pendingAttachments: [ConnectOnionInputFile] = []
     @Published var attachmentError: String?
     /// Runtime question or approval awaiting the user's answer; sending and
     /// attaching stay disabled until it resolves.
     @Published var pendingInteraction: ConnectOnionPendingInteraction?
     @Published var interactionError: String?
+    /// Why each failed message didn't go through. Kept for this run of the app only.
+    @Published var failureByMessageID: [UUID: ChatFailure] = [:]
     @Published var recoveryStatus: String?
+    @Published var incompatibility: OIPHandshake.Incompatibility?
+    /// The newest DASHBOARD_SNAPSHOT for this chat - adds the session checks.
+    @Published var dashboard: OIPDashboard?
     @Published var isSubmittingInteraction = false
     @Published private(set) var latestUsage: ChatUsageSummary?
+    @Published private(set) var agentProfile: OIPAgentProfile?
     /// Set after an interrupt so every trailing event from that cancelled run
     /// is discarded instead of reaching the transcript.
     @Published private(set) var isDiscardingInterruptedEvents = false
+    /// This conversation's Work Rooms, fed every decoded provider frame.
+    let workRooms: WorkRoomStore
+    /// The pairing code a Station pane sends as the invite code when the host asks for onboarding. The attempt
+    /// count changes on every entry, so the pane's connection restarts even for the same code.
+    /// Set in `ChatViewModel+WorkRoom.swift`.
+    @Published var stationInviteCode: String?
+    @Published var stationOnboardingAttempt = 0
 
     let session: ChatSession
     private let initialConfiguration: GeneralAgentConfiguration
@@ -34,7 +50,12 @@ class ChatViewModel: ObservableObject {
     }
     let service: ConnectOnionService
     let appViewModel: AppViewModel
-    let voiceInputService = VoiceInputService()
+    let voiceInputService: VoiceInputService
+    /// The Work Room whose composer started the current dictation. The one voice service serves
+    /// the main composer and the Work Room composer, so only one of them can use it at a time.
+    @Published var dictatingRoomID: String?
+    /// The microphone guidance for the last failed dictation, shown in that Work Room's composer.
+    @Published var dictationGuidance: String?
 
     private var messageTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
@@ -45,16 +66,23 @@ class ChatViewModel: ObservableObject {
     private var textBeforeVoiceInput = ""
     private var activeExecutionRunID: UUID?
 
-    init(session: ChatSession, configuration: GeneralAgentConfiguration, service: ConnectOnionService, appViewModel: AppViewModel) {
+    init(session: ChatSession, configuration: GeneralAgentConfiguration, service: ConnectOnionService, appViewModel: AppViewModel,
+         voiceInputService: VoiceInputService? = nil) {
+        self.voiceInputService = voiceInputService ?? VoiceInputService()
         self.session = session
         self.initialConfiguration = configuration
         self.service = service
         self.appViewModel = appViewModel
+        workRooms = appViewModel.workRoomStore(for: session.id)
+        service.ownsProviderApproval = { [workRooms] in workRooms.ownsApproval($0) }
+        service.onWorkRoomEvent = { [weak self] in self?.handleIncomingEvent($0) }
 
         messages = appViewModel.findMessages(for: session.id)
         executionItems = appViewModel.findExecutionItems(for: session.id)
         executionRuns = appViewModel.findExecutionRuns(for: session.id)
         latestUsage = messages.reversed().compactMap(\.usage).first
+        // Reopen the chat with whatever was left unsent.
+        inputText = appViewModel.draft(for: session.id)
 
         setupBindings()
     }
@@ -68,6 +96,17 @@ class ChatViewModel: ObservableObject {
         service.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // A chat that reaches its agent counts it as online (sidebar dot, count, skill cards).
+        // Only ever "online": going offline stays with the background check.
+        service.$isHostedAgentStatusLive
+            .removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                guard let self, self.configuration.connectionType == .byAddress else { return }
+                self.appViewModel.setAgentConnected(self.configuration, isConnected: true)
             }
             .store(in: &cancellables)
 
@@ -100,13 +139,39 @@ class ChatViewModel: ObservableObject {
         voiceInputService.$transcript
             .sink { [weak self] transcript in
                 guard let self, !transcript.isEmpty else { return }
+                if let roomID = self.dictatingRoomID {
+                    self.workRooms.appendDictation(transcript, in: roomID)
+                    return
+                }
                 let prefix = self.textBeforeVoiceInput
                 self.inputText = prefix.isEmpty ? transcript : "\(prefix) \(transcript)"
             }
             .store(in: &cancellables)
 
+        // A failed Work Room dictation shows its guidance there; a finished one frees the mic.
+        voiceInputService.$errorMessage
+            .sink { [weak self] message in
+                guard let self, let message, self.dictatingRoomID != nil else { return }
+                self.dictationGuidance = message
+                self.dictatingRoomID = nil
+            }
+            .store(in: &cancellables)
+
+        voiceInputService.$isTranscribing
+            .removeDuplicates()
+            .sink { [weak self] isTranscribing in
+                if !isTranscribing { self?.dictatingRoomID = nil }
+            }
+            .store(in: &cancellables)
+
+        // `.values` on a PassthroughSubject keeps no buffer, so an event sent while the previous one is still being
+        // handled would be lost. The stream keeps every event, in order, until it is handled.
+        let (events, continuation) = AsyncStream.makeStream(of: ConnectOnionTransportEvent.self)
+        service.incomingEvents
+            .sink { continuation.yield($0) }
+            .store(in: &cancellables)
         messageTask = Task { [weak self] in
-            for await event in service.incomingEvents.values {
+            for await event in events {
                 if Task.isCancelled { break }
                 guard let self else { break }
                 self.handleIncomingEvent(event)
@@ -115,6 +180,12 @@ class ChatViewModel: ObservableObject {
     }
 
     func handleIncomingEvent(_ event: ConnectOnionTransportEvent) {
+        // Revision-gated Work Room state, not transcript output: a Provider's
+        // terminal update must still land while an interrupted run is discarded.
+        if event.isWorkRoomEvent {
+            handleWorkRoomEvent(event)
+            return
+        }
         if isDiscardingInterruptedEvents {
             return
         }
@@ -144,6 +215,12 @@ class ChatViewModel: ObservableObject {
 
         case .usage(let usage):
             pendingUsage = usage
+
+        case .agentProfile(let profile):
+            agentProfile = profile
+            if profile.isClaudeStation {
+                appViewModel.markClaudeStation(initialConfiguration.id)
+            }
 
         case .executionItem(let item):
             upsertExecutionItem(item)
@@ -206,6 +283,9 @@ class ChatViewModel: ObservableObject {
         case .modeChanged:
             interactionError = nil
 
+        case .sessionModes:
+            break
+
         case .planReviewRequired(let request):
             pendingInteraction = .planReview(request)
             interactionError = nil
@@ -227,25 +307,73 @@ class ChatViewModel: ObservableObject {
             finishActiveExecutionRun(with: .done)
             markOutstandingMessages(as: .sent)
 
+        case .dashboard(let dashboard):
+            // The host resends the page on every connect and reattach; an equal one changes nothing.
+            if self.dashboard != dashboard {
+                self.dashboard = dashboard
+            }
+
+        case .workRoomFrame, .workRoomSnapshot, .workRoomTransport, .workRoomConnectionDropped:
+            break  // Fed to the Work Room store above.
+
+        case .stationRefusedChat:
+            // The host is a Station: the message was never a chat turn, so no failure reason is shown.
+            pendingUsage = nil
+            isSubmittingInteraction = false
+            finishActiveExecutionRun(with: .error)
+            markOutstandingMessages(as: .error)
+
+        case .incompatible(let incompatibility):
+            pendingUsage = nil
+            isSubmittingInteraction = false
+            pendingInteraction = nil
+            let replyToMessageID = activeRequestMessageID
+            finishActiveExecutionRun(with: .error)
+            markOutstandingMessages(as: .error)
+            if configuration.connectionType == .byAddress {
+                appViewModel.setAgentConnected(configuration, isConnected: false)
+            }
+            self.incompatibility = incompatibility
+            appendAgentMessage(
+                incompatibility.message,
+                replyToMessageID: replyToMessageID,
+                artifacts: consumePendingArtifacts(),
+                artifactWarnings: consumePendingArtifactWarnings()
+            )
+
         case .error(let message):
             pendingUsage = nil
             isSubmittingInteraction = false
             interactionError = message
             let replyToMessageID = activeRequestMessageID
             finishActiveExecutionRun(with: .error)
-            if case .onboarding? = pendingInteraction {
-                return
-            }
+            let failedIDs = outstandingMessageIDs
+            // The host is asking for onboarding; the error belongs to that prompt, not to a failed chat.
+            if case .onboarding? = pendingInteraction { return }
             markOutstandingMessages(as: .error)
             if configuration.connectionType == .byAddress {
                 appViewModel.setAgentConnected(configuration, isConnected: false)
             }
-            appendAgentMessage(
-                "Error: \(message)",
-                replyToMessageID: replyToMessageID,
-                artifacts: consumePendingArtifacts(),
-                artifactWarnings: consumePendingArtifactWarnings()
-            )
+            // The reason goes on the message that failed, not in an agent reply.
+            let failure = ConnectOnionRemoteError.chatFailure(forDescription: message)
+            if failedIDs.isEmpty {
+                appendSystemNotice(failure.sentence(agentName: configuration.name))
+            } else {
+                for id in failedIDs {
+                    failureByMessageID[id] = failure
+                }
+            }
+            // Files the agent made before failing still belong in the chat.
+            let artifacts = consumePendingArtifacts()
+            let warnings = consumePendingArtifactWarnings()
+            if !artifacts.isEmpty || !warnings.isEmpty {
+                appendAgentMessage(
+                    "",
+                    replyToMessageID: replyToMessageID,
+                    artifacts: artifacts,
+                    artifactWarnings: warnings
+                )
+            }
         }
     }
 
@@ -260,6 +388,37 @@ class ChatViewModel: ObservableObject {
 
     var connectionSnapshot: AgentConnectionSnapshot? {
         appViewModel.agentConnectionSnapshots[configuration.id]
+    }
+
+    /// This chat's status, from its own connection, never the background agent check.
+    /// `connectingFor` is measured by the view, so "Connecting…" becomes "Can't connect" after 10 s.
+    func connectionStatus(connectingFor: TimeInterval = 0) -> ChatConnectionStatus {
+        if incompatibility != nil {
+            return .unreachable(.incompatible)
+        }
+        if service.isHostedAgentStatusLive {
+            return service.isAgentRequestActive ? .working : .live
+        }
+        if service.connectionError != nil
+            || ["Offline", "Connection error"].contains(service.hostedAgentStatus) {
+            return .unreachable(.noAnswer)
+        }
+        if service.isConnected {
+            return connectingFor >= ChatConnectionStatus.unreachableAfter
+                ? .unreachable(.noAnswer)
+                : .connecting
+        }
+        return .notConnected
+    }
+
+    var isConnecting: Bool {
+        connectionStatus() == .connecting
+    }
+
+    /// The status's Retry: drop this chat's connection and open it again.
+    func retryConnection() {
+        service.disconnect()
+        service.connect(with: configuration)
     }
 
     func connectIfNeeded() {
@@ -393,7 +552,7 @@ class ChatViewModel: ObservableObject {
     /// Captures the composer text before recording so the live transcript
     /// appends to what was typed instead of replacing it.
     func toggleVoiceInput() {
-        guard !voiceInputService.isTranscribing else { return }
+        guard !voiceInputService.isTranscribing, dictatingRoomID == nil else { return }
         if voiceInputService.isRecording {
             voiceInputService.stopRecording()
         } else {
@@ -410,7 +569,7 @@ extension ChatViewModel {
     /// summarize prompt so the request text is never empty.
     func sendMessage() {
         let trimmedInput = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedInput.isEmpty || !pendingAttachments.isEmpty else { return }
+        guard !trimmedInput.isEmpty || !pendingAttachments.isEmpty, !isStation else { return }
 
         if let validationError = attachmentValidationError {
             attachmentError = validationError
@@ -434,6 +593,17 @@ extension ChatViewModel {
         )
     }
 
+    /// A Control Center button's `/skill args` line, already checked by the kit pane, goes out as a
+    /// normal, visible user turn (O Chat and Android do the same). The composer draft is left alone.
+    func runControlCenterSkill(_ message: String) {
+        guard pendingInteraction == nil else { return }
+        submitRequest(
+            ChatRetryRequest(displayContent: message, requestContent: message, files: []),
+            title: message,
+            clearsComposer: false
+        )
+    }
+
     func canRetryAgentMessage(_ agentMessage: ChatMessage) -> Bool {
         guard agentMessage.role == .agent,
               pendingInteraction == nil,
@@ -446,6 +616,27 @@ extension ChatViewModel {
             return false
         }
         return true
+    }
+
+    func canRetryFailedMessage(_ message: ChatMessage) -> Bool {
+        message.role == .user
+            && message.status == .error
+            && pendingInteraction == nil
+            && !service.isAgentRequestActive
+            && retryRequest(for: message) != nil
+    }
+
+    /// Sends a failed message again: the failed copy goes, a fresh one is sent in its place.
+    func retryFailedMessage(_ message: ChatMessage) {
+        guard canRetryFailedMessage(message),
+              let request = retryRequest(for: message) else {
+            return
+        }
+        failureByMessageID[message.id] = nil
+        messages.removeAll { $0.id == message.id }
+        appViewModel.messages.removeAll { $0.id == message.id }
+        attachmentError = nil
+        submitRequest(request, title: nil, clearsComposer: false)
     }
 
     func retryAgentMessage(_ agentMessage: ChatMessage) {
@@ -478,7 +669,27 @@ extension ChatViewModel {
         }
     }
 
+    /// The running tool the open approval card asks about. Its row shows Awaiting approval.
+    var toolAwaitingApprovalID: String? {
+        guard case .approval(let request)? = pendingInteraction,
+              let runID = activeExecutionRunID,
+              let run = executionRuns.first(where: { $0.id == runID }) else {
+            return nil
+        }
+        // Matched by name and arguments. If the approval encodes a number differently from the
+        // tool call (1 vs 1.0), nothing matches and the row just stays Running: harmless.
+        return run.items.last { item in
+            guard case .toolCall(let toolCall) = item else { return false }
+            return toolCall.status == .running
+                && toolCall.name.lowercased() == request.tool.lowercased()
+                && JSONValue.object(toolCall.args) == request.arguments
+        }?.id
+    }
+
     func submitApproval(_ decision: ConnectOnionApprovalDecision) {
+        if case .rejectSoft = decision, let toolID = toolAwaitingApprovalID {
+            markTool(toolID, as: .skipped)
+        }
         if case .approval(let request)? = pendingInteraction {
             let recordedDecision: ApprovalRecordDecision
             switch decision {
@@ -613,10 +824,20 @@ extension ChatViewModel {
     var confirmedExecutionMode: AgentExecutionMode {
         service.confirmedExecutionMode
     }
-
+    /// Pending until mode_changed arrives. When idle the request rides the next INPUT
     var isExecutionModeChangePending: Bool {
-        service.isAgentRequestActive
-            && service.desiredExecutionMode != service.confirmedExecutionMode
+        service.desiredExecutionMode != service.confirmedExecutionMode
+    }
+
+    /// Accept (full-access) only when the host lists it; the host rejects it with -32602 otherwise
+    var offeredExecutionModes: [AgentExecutionMode] {
+        AgentExecutionMode.allCases.filter {
+            $0 != .accept || service.availableExecutionModes.contains(.accept)
+        }
+    }
+
+    var acceptTurnsLeft: Int? {
+        service.confirmedExecutionMode == .accept ? service.acceptTurnsLeft : nil
     }
 
     var canChangeExecutionMode: Bool {
@@ -675,6 +896,22 @@ extension ChatViewModel {
         appViewModel.addMessage(newMessage)
     }
 
+    /// A problem that belongs to no message: one quiet row, not repeated.
+    private func appendSystemNotice(_ text: String) {
+        if let last = messages.last, last.role == .system, last.content == text {
+            return
+        }
+        let notice = ChatMessage(sessionId: session.id, role: .system, content: text)
+        messages.append(notice)
+        appViewModel.addMessage(notice)
+    }
+
+    private var outstandingMessageIDs: [UUID] {
+        messages
+            .filter { $0.status == .sending || $0.status == .queued }
+            .map(\.id)
+    }
+
     private func consumePendingArtifacts() -> [GeneratedArtifactReference] {
         defer { pendingArtifacts = [] }
         return pendingArtifacts
@@ -707,6 +944,7 @@ extension ChatViewModel {
         title: String?,
         clearsComposer: Bool
     ) {
+        guard !service.isInterruptRequested, !isStation else { return }
         let summaries = request.files.map {
             ChatAttachmentSummary(name: $0.name, byteCount: $0.byteCount)
         }
@@ -851,7 +1089,9 @@ extension ChatViewModel {
             thinking.status = itemStatus
             return .thinking(thinking)
         case .toolCall(var toolCall) where toolCall.status == .running:
-            toolCall.status = itemStatus
+            // It never got a result, so it never finished: Stop, a lost connection, a
+            // failure, or the rest of a batch you stopped (the host sends those nothing).
+            toolCall.status = .interrupted
             return .toolCall(toolCall)
         case .approval:
             return item
@@ -910,6 +1150,16 @@ extension ChatViewModel {
             runs[runIndex].items.append(item)
         }
         setExecutionRuns(runs)
+    }
+
+    private func markTool(_ toolID: String, as status: ExecutionStatus) {
+        guard let runID = activeExecutionRunID,
+              let run = executionRuns.first(where: { $0.id == runID }),
+              case .toolCall(var toolCall)? = run.items.first(where: { $0.id == toolID }) else {
+            return
+        }
+        toolCall.status = status
+        upsertExecutionItem(.toolCall(toolCall))
     }
 
     private func updateMessageStatus(_ messageID: UUID, to status: MessageStatus) {
