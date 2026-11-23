@@ -581,4 +581,63 @@ final class ChatViewTests: XCTestCase {
         render(interactionViewModel)
     }
 
+    func testSkillPaletteNavigationMovesForwardAndBackward() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 3, offset: 1
+            ),
+            1
+        )
+
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 1, skillCount: 3, offset: -1
+            ),
+            0
+        )
+    }
+
+    func testSkillPaletteNavigationWrapsAtBothEnds() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 2, skillCount: 3, offset: 1
+            ),
+            0
+        )
+
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 3, offset: -1
+            ),
+            2
+        )
+    }
+
+    func testSkillPaletteNavigationHandlesEmptyList() {
+        XCTAssertNil(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 0, offset: 1
+            )
+        )
+    }
+
+    func testSkillPaletteCompletionUsesSelectedSkill() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.completion(
+                for: ["commit", "deploy", "review"],
+                selectedIndex: 1
+            ),
+            "/deploy "
+        )
+    }
+
+    func testSkillPaletteCompletionRejectsInvalidSelection() {
+        XCTAssertNil(
+            SkillPaletteNavigation.completion(
+                for: ["commit", "deploy"],
+                selectedIndex: 2
+            )
+        )
+    }
+
 }
