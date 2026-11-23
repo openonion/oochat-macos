@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import SwiftUI
 
 struct ExecutionItemRow: View {
@@ -142,9 +143,10 @@ struct ExecutionItemRow: View {
                     Text(toolCall.statusLabel(timing: toolCall.timingMS.map(formatDuration)))
                         .font(AppTypography.mono(size: AppFontSize.footnote, weight: .medium))
                         .tracking(0.5)
-                        .foregroundStyle(.secondary.opacity(0.7))
+                        .foregroundStyle(OOColor.inkSecondary)
                         .fixedSize()
                 }
+                .frame(minHeight: 28)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -158,20 +160,17 @@ struct ExecutionItemRow: View {
         }
     }
 
-    /// Leading indicator for in-progress and failed tool calls. Completed calls
-    /// show no marker — the tool icon alone carries a clean, un-noisy done state.
+    /// The kit's status mark: a waiting dot while the call runs, a check when it is done and
+    /// a cross when it failed.
     @ViewBuilder
     private func toolStatusIcon(_ status: ExecutionStatus) -> some View {
         switch status {
         case .running:
-            ProgressView()
-                .controlSize(.small)
+            OOToolStatus(.running)
         case .done:
-            EmptyView()
+            OOToolStatus(.done)
         case .error:
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: AppFontSize.subheadline))
-                .foregroundStyle(AppPalette.error)
+            OOToolStatus(.failed)
         }
     }
 
@@ -401,9 +400,10 @@ struct ExecutionItemRow: View {
                         if thinking.content?.isEmpty == false {
                             Image(systemName: "chevron.down")
                                 .font(.caption2)
-                                .foregroundStyle(.secondary.opacity(0.6))
+                                .foregroundStyle(OOColor.inkSecondary)
                         }
                     }
+                    .frame(minHeight: 28)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -446,7 +446,7 @@ struct ExecutionItemRow: View {
                         if hasExpected {
                             Image(systemName: "chevron.right")
                                 .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary.opacity(0.6))
+                                .foregroundStyle(OOColor.inkSecondary)
                                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         }
                     }

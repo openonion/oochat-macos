@@ -418,7 +418,9 @@ struct AgentControlPanel: View {
 
                     Text(statusLabel(for: snapshot))
                         .font(.system(size: AppFontSize.footnote, weight: .semibold))
-                        .foregroundStyle(statusColor(for: snapshot))
+                        .foregroundStyle(
+                            snapshot?.state == .invalid ? AppPalette.warningText : statusColor(for: snapshot)
+                        )
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(

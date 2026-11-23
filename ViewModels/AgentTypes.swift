@@ -4,6 +4,7 @@ import Foundation
 enum NavigationItem: Hashable {
     case session(UUID)
     case newConfiguration
+    case chooseAgent
     case usage
     case settings
 }

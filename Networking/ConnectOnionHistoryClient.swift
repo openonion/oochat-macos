@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// The `session` object nested inside a hosted history record.
@@ -10,7 +11,7 @@ nonisolated struct ConnectOnionHostedConversation: Decodable, Sendable {
 nonisolated struct ConnectOnionHostedMessage: Decodable, Sendable {
     var role: String
     /// Tool-call records in ConnectOnion 1.5.11 can omit `content`.
-    var content: ConnectOnionJSONValue?
+    var content: JSONValue?
     var isInternal: Bool?
 
     var text: String? {
