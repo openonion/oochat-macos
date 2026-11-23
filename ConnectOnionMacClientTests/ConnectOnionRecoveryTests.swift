@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import XCTest
+import ConnectOnionKit
+
 @testable import ConnectOnionMacClient
 
 extension ConnectOnionRemoteAgentTests {
@@ -254,14 +256,247 @@ extension ConnectOnionRemoteAgentTests {
         let key = try Curve25519.Signing.PrivateKey(
             rawRepresentation: privateKeyData
         )
-        let canonicalPayload = try JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.sortedKeys]
-        )
+        // let canonicalPayload = try JSONSerialization.data(
+        //     withJSONObject: payload,
+        //     options: [.sortedKeys]
+        // )
+
+        let canonicalPayload = CanonicalJSON.data(from: payload.mapValues { JSONValue(any: $0) })
         XCTAssertTrue(
             key.publicKey.isValidSignature(signature, for: canonicalPayload),
             file: file,
             line: line
         )
+    }
+
+    func testRelaunchedClientResumesTheSameSessionWithItsLastMessageID() async throws {
+        let address = makeAddress("93")
+        let conversationID = UUID()
+        let storageKey = "connectonion.remote-session.\(conversationID.uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: storageKey) }
+        // What the first launch left behind before it was killed.
+        UserDefaults.standard.set(
+            try makeJSONData([
+                "sessionID": "relaunch-session",
+                "lastMessageID": "evt-41",
+                "executionState": "idle",
+                "inputWasSent": false
+            ]),
+            forKey: storageKey
+        )
+
+        let resolver = makeResolver { request in
+            (
+                makeHTTPResponse(for: request, statusCode: 200),
+                try makeJSONData(["name": "Relaunch Agent", "address": address])
+            )
+        }
+
+        let socket = try ScriptedWebSocketTask(events: [
+            [
+                "type": "CONNECTED",
+                "status": "connected",
+                "session_id": "relaunch-session"
+            ],
+            ["type": "OUTPUT", "result": "picked up where we left off"]
+        ])
+
+        let client = ConnectOnionRemoteAgentClient(
+            configuredTarget: "https://agent.test",
+            conversationID: conversationID,
+            resolver: resolver,
+            identityStore: makeEphemeralIdentityStore(),
+            webSocketFactory: { _ in socket },
+            sleep: { _ in }
+        )
+
+        let output = try await client.send(
+            prompt: "Continue",
+            onUpdate: { _ in },
+            onEvent: { _ in }
+        )
+
+        XCTAssertEqual(output, "picked up where we left off")
+        let connect = try XCTUnwrap(try socket.sentJSONObjects().first)
+        XCTAssertEqual(connect["type"] as? String, "CONNECT")
+        XCTAssertEqual(connect["session_id"] as? String, "relaunch-session")
+        XCTAssertEqual(connect["last_msg_id"] as? String, "evt-41")
+    }
+}
+
+// A turn that finished while the app was quit (or the socket was down) is not replayed by the
+// host: CONNECTED says "connected" and the turn is in chat_items. These cover reading it back
+// without ever sending the INPUT a second time.
+extension ConnectOnionRemoteAgentTests {
+    func testRelaunchShowsAReplyThatFinishedWhileTheAppWasQuit() async throws {
+        let address = makeAddress("94")
+        let conversationID = UUID()
+        let storageKey = "connectonion.remote-session.\(conversationID.uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: storageKey) }
+        // What the first launch left behind: INPUT sent, no OUTPUT yet, then the app quit.
+        UserDefaults.standard.set(
+            try makeJSONData([
+                "sessionID": "quit-session",
+                "sessionData": try makeJSONData(["turn": 1]).base64EncodedString(),
+                "lastMessageID": "evt-7",
+                "executionState": "running",
+                "activeInputID": "input-quit",
+                "inputWasSent": true,
+                "activePrompt": "Make him a text file"
+            ]),
+            forKey: storageKey
+        )
+        let resolver = makeResolver { request in
+            (
+                makeHTTPResponse(for: request, statusCode: 200),
+                try makeJSONData(["name": "Quit Agent", "address": address])
+            )
+        }
+        let socket = try ScriptedWebSocketTask(events: [
+            [
+                "type": "CONNECTED",
+                "status": "connected",
+                "session_id": "quit-session",
+                "server_newer": true,
+                "session": ["turn": 2],
+                "chat_items": [
+                    ["id": "msg-0", "type": "user", "content": "Make a smiling man"],
+                    ["id": "msg-1", "type": "agent", "content": "  :)"],
+                    ["id": "msg-2", "type": "user", "content": "Make him a text file"],
+                    ["id": "tool-1", "type": "tool_call", "name": "write", "status": "done"],
+                    ["id": "msg-3", "type": "agent", "content": "Created smiley.txt"]
+                ]
+            ]
+        ])
+        let client = ConnectOnionRemoteAgentClient(
+            configuredTarget: "https://agent.test",
+            conversationID: conversationID,
+            resolver: resolver,
+            identityStore: makeEphemeralIdentityStore(),
+            webSocketFactory: { _ in socket },
+            sleep: { _ in }
+        )
+        let recorder = RemoteProtocolRecorder()
+
+        await client.recoverIfNeeded(
+            onUpdate: { await recorder.record($0) },
+            onEvent: { await recorder.record($0) }
+        )
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertTrue(snapshot.events.contains("output:Created smiley.txt"))
+        XCTAssertTrue(snapshot.events.contains("recovery:Recovered completed session"))
+        XCTAssertFalse(snapshot.events.contains { $0.hasPrefix("error:") })
+        let pendingAfter = await client.hasPendingExecution()
+        XCTAssertFalse(pendingAfter)
+        let sent = try socket.sentJSONObjects()
+        XCTAssertEqual(sent.compactMap { $0["type"] as? String }, ["CONNECT"], "the INPUT was sent again")
+        // No turn history goes up, so the host's copy wins and chat_items come back.
+        XCTAssertNil(sent.first?["session"] as? [String: Any])
+    }
+
+    func testRelaunchNeverShowsAnOlderTurnsReplyOrResends() async throws {
+        let address = makeAddress("95")
+        let conversationID = UUID()
+        let storageKey = "connectonion.remote-session.\(conversationID.uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: storageKey) }
+        UserDefaults.standard.set(
+            try makeJSONData([
+                "sessionID": "lost-session",
+                "executionState": "running",
+                "activeInputID": "input-lost",
+                "inputWasSent": true,
+                "activePrompt": "Delete the temp folder"
+            ]),
+            forKey: storageKey
+        )
+        let resolver = makeResolver { request in
+            (
+                makeHTTPResponse(for: request, statusCode: 200),
+                try makeJSONData(["name": "Lost Agent", "address": address])
+            )
+        }
+        // The INPUT never arrived: the host's last turn is an older message.
+        let socket = try ScriptedWebSocketTask(events: [
+            [
+                "type": "CONNECTED",
+                "status": "connected",
+                "session_id": "lost-session",
+                "server_newer": true,
+                "chat_items": [
+                    ["id": "msg-0", "type": "user", "content": "earlier"],
+                    ["id": "msg-1", "type": "agent", "content": "earlier reply"]
+                ]
+            ]
+        ])
+        let client = ConnectOnionRemoteAgentClient(
+            configuredTarget: "https://agent.test",
+            conversationID: conversationID,
+            resolver: resolver,
+            identityStore: makeEphemeralIdentityStore(),
+            webSocketFactory: { _ in socket },
+            sleep: { _ in }
+        )
+        let recorder = RemoteProtocolRecorder()
+
+        await client.recoverIfNeeded(
+            onUpdate: { await recorder.record($0) },
+            onEvent: { await recorder.record($0) }
+        )
+
+        let snapshot = await recorder.snapshot()
+        XCTAssertFalse(snapshot.events.contains("output:earlier reply"))
+        XCTAssertTrue(snapshot.events.contains(
+            "error:" + (ConnectOnionRemoteError.recoveryUnavailable.errorDescription ?? "")
+        ))
+        XCTAssertEqual(try socket.sentJSONObjects().compactMap { $0["type"] as? String }, ["CONNECT"])
+    }
+
+    func testDroppedSocketAfterTheTurnFinishedReturnsTheReplyWithoutResending() async throws {
+        let address = makeAddress("96")
+        let resolver = makeResolver { request in
+            (
+                makeHTTPResponse(for: request, statusCode: 200),
+                try makeJSONData(["name": "Drop Agent", "address": address])
+            )
+        }
+        // First socket: connects, takes the INPUT, then drops before OUTPUT.
+        let first = try ScriptedWebSocketTask(events: [
+            ["type": "CONNECTED", "status": "new", "session_id": "drop-session"]
+        ])
+        // By the reconnect the host has finished the turn.
+        let second = try ScriptedWebSocketTask(events: [
+            [
+                "type": "CONNECTED",
+                "status": "connected",
+                "session_id": "drop-session",
+                "server_newer": true,
+                "chat_items": [
+                    ["id": "msg-0", "type": "user", "content": "Continue"],
+                    ["id": "msg-1", "type": "agent", "content": "done"]
+                ]
+            ]
+        ])
+        let sockets = [first, second]
+        let opened = LockedCounter()
+        let client = ConnectOnionRemoteAgentClient(
+            configuredTarget: "https://agent.test",
+            conversationID: nil,
+            resolver: resolver,
+            identityStore: makeEphemeralIdentityStore(),
+            webSocketFactory: { _ in sockets[min(opened.increment(), sockets.count) - 1] },
+            sleep: { _ in }
+        )
+
+        let output = try await client.send(
+            prompt: "Continue",
+            onUpdate: { _ in },
+            onEvent: { _ in }
+        )
+
+        XCTAssertEqual(output, "done")
+        XCTAssertEqual(opened.value, 2)
+        XCTAssertEqual(try first.sentJSONObjects().compactMap { $0["type"] as? String }, ["CONNECT", "INPUT"])
+        XCTAssertEqual(try second.sentJSONObjects().compactMap { $0["type"] as? String }, ["CONNECT"])
     }
 }

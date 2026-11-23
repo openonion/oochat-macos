@@ -490,11 +490,18 @@ extension ConnectOnionServiceTests {
         service.confirmedExecutionMode = .safe
         XCTAssertEqual(viewModel.desiredExecutionMode, .plan)
         XCTAssertEqual(viewModel.confirmedExecutionMode, .safe)
+        XCTAssertTrue(viewModel.isExecutionModeChangePending, "pending while idle too, until mode_changed")
+        service.confirmedExecutionMode = .plan
         XCTAssertFalse(viewModel.isExecutionModeChangePending)
 
-        service.isAgentRequestActive = true
-        XCTAssertTrue(viewModel.isExecutionModeChangePending)
-        service.isAgentRequestActive = false
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan], "accept hidden until the host lists it")
+        service.availableExecutionModes = [.safe, .plan, .accept]
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan, .accept])
+
+        service.acceptTurnsLeft = 3
+        XCTAssertNil(viewModel.acceptTurnsLeft, "turns left only shows in accept")
+        service.confirmedExecutionMode = .accept
+        XCTAssertEqual(viewModel.acceptTurnsLeft, 3)
 
         let plan = ConnectOnionPlanReviewRequest(id: "plan-1", content: "# Plan")
         viewModel.handleIncomingEvent(.planReviewRequired(plan))

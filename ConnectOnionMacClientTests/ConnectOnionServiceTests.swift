@@ -275,6 +275,44 @@ final class ConnectOnionServiceTests: XCTestCase {
         withExtendedLifetime(cancellable) {}
     }
 
+    // 16.2: CONNECTED confirms only the host's side, so a requested mode stays pending.
+    @MainActor
+    func testSessionModesKeepARequestPendingAndTurnsLeftFollowsAccept() async {
+        let address = "0x" + String(repeating: "16", count: 32)
+        let stub = await StubRemoteAgentClient(
+            endpoint: ConnectOnionResolvedEndpoint(
+                agentAddress: address,
+                webSocketURL: URL(string: "wss://agent.test/ws")!,
+                httpBaseURL: URL(string: "https://agent.test")!,
+                isDirect: true,
+                info: nil
+            ),
+            eventsOnSend: [
+                .modeChanged(.accept, turnsLeft: 4),
+                .sessionModes(available: [.safe, .plan, .accept], current: .safe, turnsLeft: nil)
+            ]
+        )
+        let service = ConnectOnionService(remoteAgentFactory: { _, _, _ in stub })
+        let configuration = GeneralAgentConfiguration(
+            name: "Mode Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        var turnsSeen: [Int?] = []
+        let cancellable = service.$acceptTurnsLeft.sink { turnsSeen.append($0) }
+
+        service.connect(with: configuration)
+        await waitUntil { service.isHostedAgentStatusLive }
+        await service.sendMessage("Go", localMessageID: UUID(), using: configuration)
+        await waitUntil { service.availableExecutionModes.contains(.accept) }
+
+        XCTAssertTrue(turnsSeen.contains(4), "turns_left shows while in accept")
+        XCTAssertEqual(service.desiredExecutionMode, .accept, "CONNECTED does not overwrite the request")
+        XCTAssertEqual(service.confirmedExecutionMode, .safe)
+        XCTAssertNil(service.acceptTurnsLeft, "no turns left outside accept")
+        withExtendedLifetime(cancellable) {}
+    }
+
     @MainActor
     func testHostedProbeFailurePublishesOfflineStatus() async {
         let address = "0x" + String(repeating: "cd", count: 32)
