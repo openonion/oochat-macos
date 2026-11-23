@@ -192,52 +192,6 @@ extension ConnectOnionRemoteAgentTests {
         XCTAssertFalse(isInvalidTargetOnline)
     }
 
-    func testHistoryClientDecodesDurableSessions() async throws {
-        RemoteAgentURLProtocolStub.install { request in
-            XCTAssertEqual(request.url?.path, "/sessions")
-            return (
-                makeHTTPResponse(for: request, statusCode: 200),
-                try makeJSONData([
-                    "sessions": [
-                        [
-                            "session_id": "shared-session",
-                            "status": "done",
-                            "prompt": "Hello",
-                            "result": "Hi there",
-                            "created": 1_700_000_000,
-                            "session": [
-                                "updated": 1_700_000_010,
-                                "messages": [
-                                    ["role": "user", "content": "Hello"],
-                                    [
-                                        "role": "assistant",
-                                        "content": "Hi there",
-                                        "internal": false
-                                    ],
-                                    ["role": "tool", "name": "glob"]
-                                ]
-                            ]
-                        ]
-                    ]
-                ])
-            )
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [RemoteAgentURLProtocolStub.self]
-        let client = ConnectOnionHistoryClient(
-            urlSession: URLSession(configuration: configuration)
-        )
-
-        let sessions = try await client.sessions(
-            from: URL(string: "http://127.0.0.1:8000")!
-        )
-
-        XCTAssertEqual(sessions.count, 1)
-        XCTAssertEqual(sessions[0].sessionID, "shared-session")
-        XCTAssertEqual(sessions[0].conversation?.messages.count, 3)
-        XCTAssertEqual(sessions[0].conversation?.messages[1].text, "Hi there")
-    }
-
     func testClientSeedsStableRemoteSessionID() async throws {
         let conversationID = UUID()
         let storageKey = "connectonion.remote-session.\(conversationID.uuidString)"

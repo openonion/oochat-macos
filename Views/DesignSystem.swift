@@ -1,121 +1,36 @@
-import SwiftUI
 import AppKit
+import ConnectOnionKit
+import SwiftUI
 
-/// Centralizes adaptive colors and deterministic agent accent colors.
+/// The app's colour roles, pointed at ConnectOnionKit's O Chat v12 tokens so
+/// every screen follows the package. Screen owners replace these names with
+/// OOColor directly in their N2.3 to N2.6 MRs, and the last of those deletes
+/// this enum. The six agent accent colours are gone (story N2 AC4).
 enum AppPalette {
-    static let accents: [Color] = [
-        Color(red: 0.85, green: 0.47, blue: 0.34),
-        Color(red: 0.42, green: 0.56, blue: 0.70),
-        Color(red: 0.55, green: 0.62, blue: 0.41),
-        Color(red: 0.78, green: 0.45, blue: 0.44),
-        Color(red: 0.40, green: 0.62, blue: 0.59),
-        Color(red: 0.83, green: 0.65, blue: 0.36)
-    ]
-
-    static func accent(for seed: Int) -> Color {
-        let normalizedIndex = ((seed % accents.count) + accents.count) % accents.count
-        return accents[normalizedIndex]
-    }
-
-    static func accent(forName name: String) -> Color {
-        var hash = 0
-        for scalar in name.unicodeScalars {
-            hash = hash &+ Int(scalar.value)
-        }
-        return accent(for: hash)
-    }
-
-    // The ConnectOnion green, same ramp as the web and iOS clients
-    // (`--color-brand-*`): 600 #16A34A / 700 #15803D in light, 400 #4ADE80 /
-    // 500 #22C55E in dark. This was a terracotta gradient — a third brand colour
-    // across our clients, after the web green and iOS violet. One product should
-    // be one colour.
-    static let brandStart = adaptive(
-        light: NSColor(srgbRed: 0.086, green: 0.639, blue: 0.290, alpha: 1),
-        dark: NSColor(srgbRed: 0.290, green: 0.871, blue: 0.502, alpha: 1)
-    )
-    static let brandEnd = adaptive(
-        light: NSColor(srgbRed: 0.082, green: 0.502, blue: 0.239, alpha: 1),
-        dark: NSColor(srgbRed: 0.133, green: 0.773, blue: 0.369, alpha: 1)
-    )
-    static let brand = brandStart
+    static let brandStart = OOColor.primary
+    static let brandEnd = OOColor.primary
+    static let brand = OOColor.primary
+    /// Flat now: O Chat has no gradients.
     static let brandGradient = LinearGradient(
-        colors: [brandStart, brandEnd],
+        colors: [OOColor.primary, OOColor.primary],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
 
-    static let background = adaptive(
-        light: NSColor(srgbRed: 1.000, green: 1.000, blue: 1.000, alpha: 1),
-        dark: NSColor(srgbRed: 0.090, green: 0.090, blue: 0.090, alpha: 1)
-    )
-
-    static let surface = adaptive(
-        light: NSColor(srgbRed: 1.00, green: 1.00, blue: 1.00, alpha: 1),
-        dark: NSColor(srgbRed: 0.129, green: 0.129, blue: 0.129, alpha: 1)
-    )
-
-    static let surfaceMuted = adaptive(
-        light: NSColor(srgbRed: 0.957, green: 0.957, blue: 0.957, alpha: 1),
-        dark: NSColor(srgbRed: 0.188, green: 0.188, blue: 0.188, alpha: 1)
-    )
-
-    static let hoverSurface = adaptive(
-        light: NSColor(srgbRed: 0.925, green: 0.925, blue: 0.925, alpha: 1),
-        dark: NSColor(srgbRed: 0.220, green: 0.220, blue: 0.220, alpha: 1)
-    )
-
-    static let sidebarSurface = adaptive(
-        light: NSColor(srgbRed: 0.969, green: 0.969, blue: 0.973, alpha: 1),
-        dark: NSColor(srgbRed: 0.051, green: 0.051, blue: 0.051, alpha: 1)
-    )
-
-    static let toolbarSurface = adaptive(
-        light: NSColor(srgbRed: 1.000, green: 1.000, blue: 1.000, alpha: 1),
-        dark: NSColor(srgbRed: 0.090, green: 0.090, blue: 0.090, alpha: 1)
-    )
-
-    static let divider = adaptive(
-        light: NSColor(srgbRed: 0.898, green: 0.898, blue: 0.898, alpha: 1),
-        dark: NSColor(srgbRed: 0.247, green: 0.247, blue: 0.247, alpha: 1)
-    )
-
-    static let brandSoft = adaptive(
-        light: NSColor(srgbRed: 0.969, green: 0.906, blue: 0.882, alpha: 1),
-        dark: NSColor(srgbRed: 0.227, green: 0.141, blue: 0.118, alpha: 1)
-    )
-
-    static let success = adaptive(
-        light: NSColor(srgbRed: 0.063, green: 0.639, blue: 0.498, alpha: 1),
-        dark: NSColor(srgbRed: 0.098, green: 0.765, blue: 0.490, alpha: 1)
-    )
-
-    static let error = adaptive(
-        light: NSColor(srgbRed: 0.863, green: 0.149, blue: 0.149, alpha: 1),
-        dark: NSColor(srgbRed: 0.937, green: 0.267, blue: 0.267, alpha: 1)
-    )
-
-    static let warning = adaptive(
-        light: NSColor(srgbRed: 0.651, green: 0.380, blue: 0.078, alpha: 1),
-        dark: NSColor(srgbRed: 0.918, green: 0.635, blue: 0.255, alpha: 1)
-    )
-
-    static let primaryAction = adaptive(
-        light: NSColor(srgbRed: 0.090, green: 0.090, blue: 0.090, alpha: 1),
-        dark: NSColor(srgbRed: 0.949, green: 0.949, blue: 0.949, alpha: 1)
-    )
-
-    static let primaryActionForeground = adaptive(
-        light: NSColor(srgbRed: 1.000, green: 1.000, blue: 1.000, alpha: 1),
-        dark: NSColor(srgbRed: 0.090, green: 0.090, blue: 0.090, alpha: 1)
-    )
-
-    private static func adaptive(light: NSColor, dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return isDark ? dark : light
-        })
-    }
+    static let background = OOColor.paper
+    static let surface = OOColor.paper
+    static let surfaceMuted = OOColor.surface
+    static let hoverSurface = OOColor.hover
+    static let sidebarSurface = OOColor.surface
+    static let toolbarSurface = OOColor.paper
+    static let divider = OOColor.hairline
+    static let brandSoft = OOColor.currentTint
+    static let success = OOColor.live
+    static let error = OOColor.failureText
+    static let warning = OOColor.decisionMark
+    static let warningText = OOColor.decisionText
+    static let primaryAction = OOColor.primary
+    static let primaryActionForeground = OOColor.onPrimary
 }
 
 /// Shared type scale. Values match the sizes previously hardcoded across

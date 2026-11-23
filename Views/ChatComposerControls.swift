@@ -1,4 +1,5 @@
 import SwiftUI
+import ConnectOnionKit
 
 struct PendingAttachmentChip: View {
     let attachment: ConnectOnionInputFile
@@ -7,7 +8,7 @@ struct PendingAttachmentChip: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "doc.fill")
-                .foregroundColor(.accentColor)
+                .foregroundColor(AppPalette.brand)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.name)
@@ -26,8 +27,11 @@ struct PendingAttachmentChip: View {
             Button(action: remove) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Remove Attachment")
             .help("Remove attachment")
         }
         .padding(.leading, 10)
@@ -52,43 +56,30 @@ struct ExecutionModeSelector: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            HStack(spacing: 2) {
-                ForEach(AgentExecutionMode.allCases, id: \.self) { mode in
-                    Button {
-                        select(mode)
-                    } label: {
-                        Text(mode.displayName)
-                            .font(.system(
-                                size: AppFontSize.footnote,
-                                weight: selected(mode) ? .semibold : .regular
-                            ))
-                            .padding(.horizontal, 9)
-                            .frame(height: 24)
-                            .foregroundColor(
-                                selected(mode)
-                                    ? AppPalette.primaryActionForeground
-                                    : .secondary
-                            )
-                            .background(selectionColor(mode))
-                            .clipShape(RoundedRectangle(
-                                cornerRadius: 6,
-                                style: .continuous
-                            ))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!viewModel.canChangeExecutionMode)
-                    .accessibilityLabel(mode.displayName)
-                    .accessibilityHint(mode.helpText)
-                    .help(mode.helpText)
+            // The native control doesn't colour a segment, so Full access says it's on beside it,
+            // in the approval card's amber: the agent runs tools without asking.
+            if viewModel.desiredExecutionMode == .accept {
+                Label("Full access", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: AppFontSize.footnote, weight: .semibold))
+                    .foregroundStyle(OOColor.decisionText)
+                    .labelStyle(.titleAndIcon)
+                    .help(AgentExecutionMode.accept.helpText)
+                    .accessibilityLabel("Full access is on")
+            }
+            // The system segmented control at regular size (story 162): a full-height target,
+            // keyboard focus and VoiceOver come with it. The ⓘ beside it explains each mode.
+            Picker("Permission mode", selection: Binding(get: { viewModel.desiredExecutionMode }, set: select)) {
+                ForEach(viewModel.offeredExecutionModes, id: \.self) { mode in
+                    Text(mode.displayName)
+                        .tag(mode)
                 }
             }
-            .padding(2)
-            .background(AppPalette.surfaceMuted)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.regular)
+            .fixedSize()
+            .disabled(!viewModel.canChangeExecutionMode)
+            .help(viewModel.desiredExecutionMode.helpText)
 
             Button {
                 isShowingModeGuide.toggle()
@@ -96,12 +87,12 @@ struct ExecutionModeSelector: View {
                 Image(systemName: "info.circle")
                     .font(.system(size: AppFontSize.footnote, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
+                    .frame(width: 28, height: 28)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Explain execution modes")
-            .help("Explain execution modes")
+            .accessibilityLabel("Explain permission modes")
+            .help("Explain permission modes")
             .popover(isPresented: $isShowingModeGuide, arrowEdge: .bottom) {
                 ExecutionModeGuide(selectedMode: viewModel.desiredExecutionMode)
             }
@@ -125,16 +116,16 @@ struct ExecutionModeSelector: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: confirmationMessage)
-        .alert("Enable Accept mode?", isPresented: $isConfirmingAcceptMode) {
+        .alert("Enable Full access?", isPresented: $isConfirmingAcceptMode) {
             Button("Cancel", role: .cancel) {}
-            Button("Enable Accept", role: .destructive) {
+            Button("Enable Full access", role: .destructive) {
                 hasAcknowledgedAcceptWarning = true
                 viewModel.setExecutionMode(.accept)
             }
         } message: {
             Text(
-                "Accept mode allows the agent to use enabled tools without "
-                    + "approval for up to 10 turns."
+                "Full access lets the agent use enabled tools without "
+                    + "approval for the turns the host allows."
             )
         }
         .onChange(of: viewModel.confirmedExecutionMode) { _, mode in
@@ -165,15 +156,6 @@ struct ExecutionModeSelector: View {
             }
         }
     }
-
-    private func selected(_ mode: AgentExecutionMode) -> Bool {
-        viewModel.desiredExecutionMode == mode
-    }
-
-    private func selectionColor(_ mode: AgentExecutionMode) -> Color {
-        guard selected(mode) else { return .clear }
-        return mode == .accept ? AppPalette.error : AppPalette.primaryAction
-    }
 }
 
 private struct ExecutionModeGuide: View {
@@ -181,14 +163,14 @@ private struct ExecutionModeGuide: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Execution modes")
+            Text("Permission mode")
                 .font(.headline)
 
             ForEach(AgentExecutionMode.allCases, id: \.self) { mode in
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: mode.systemImage)
                         .font(.system(size: AppFontSize.body, weight: .medium))
-                        .foregroundStyle(mode == .accept ? AppPalette.error : .secondary)
+                        .foregroundStyle(mode == .accept ? OOColor.decisionText : .secondary)
                         .frame(width: 20, height: 20)
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -217,9 +199,32 @@ private struct ExecutionModeGuide: View {
 
     private func title(for mode: AgentExecutionMode) -> String {
         switch mode {
-        case .safe: return "Safe · Recommended"
-        case .plan: return "Plan"
-        case .accept: return "Accept · Up to 10 turns"
+        case .safe: return "Auto · Recommended"
+        case .plan: return "Read only"
+        case .accept: return "Full access"
+        }
+    }
+}
+
+/// Takes the composer's place in a chat from a previous identity: the agent no longer knows this
+/// Address's old session, so the only way on is a new chat with it.
+struct PreviousIdentityComposerBar: View {
+    let onStartNewChat: () -> Void
+
+    var body: some View {
+        HStack(spacing: OOSpace.medium) {
+            Label(PreviousIdentity.label, systemImage: "clock.arrow.circlepath")
+                .font(.system(size: AppFontSize.body))
+                .foregroundStyle(OOColor.inkSecondary)
+            Spacer()
+            Button(PreviousIdentity.startNewChat, action: onStartNewChat)
+                .buttonStyle(.ooPrimary)
+        }
+        .padding(OOSpace.medium)
+        .background(OOColor.paper, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(OOColor.hairline, lineWidth: 1)
         }
     }
 }

@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 import XCTest
 @testable import ConnectOnionMacClient
@@ -425,6 +426,111 @@ final class WalletServiceTests: XCTestCase {
             failedService.errorMessage == "Test service failure"
                 && !failedService.isTranscribing
         }
+    }
+
+    @MainActor
+    func testWorkRoomDictationAppendsWithoutSendingAndKeepsDraftOnFailure() async {
+        let transcriber = StubAudioTranscriber(result: .success("add a test"))
+        let service = makeRecordingService(transcriber: transcriber)
+        let chat = makeDictationChat(voice: service)
+        chat.workRooms.setDraft("Fix the bug", in: "codex:call-7")
+
+        chat.toggleDictation(in: "codex:call-7")
+        await waitUntil { service.isRecording }
+        chat.toggleVoiceInput()
+        XCTAssertEqual(chat.inputText, "")
+        chat.toggleDictation(in: "codex:call-7")
+        await waitUntil { chat.dictatingRoomID == nil && service.transcript == "add a test" }
+        XCTAssertEqual(chat.workRooms.workRoom(id: "codex:call-7")?.composer.draft, "Fix the bug add a test")
+        XCTAssertEqual(chat.inputText, "")
+
+        transcriber.result = .failure(ConnectOnionTranscriptionError.invalidResponse)
+        chat.toggleDictation(in: "codex:call-7")
+        await waitUntil { service.isRecording }
+        chat.toggleDictation(in: "codex:call-7")
+        await waitUntil { chat.dictationGuidance != nil && !service.isTranscribing }
+        XCTAssertEqual(chat.dictationGuidance, service.errorMessage)
+        XCTAssertEqual(chat.workRooms.workRoom(id: "codex:call-7")?.composer.draft, "Fix the bug add a test")
+    }
+
+    @MainActor
+    func testCancellingWorkRoomDictationAppendsNothing() async {
+        let service = makeRecordingService(transcriber: StubAudioTranscriber(result: .success("ignored")))
+        let chat = makeDictationChat(voice: service)
+
+        chat.toggleDictation(in: "codex:call-7")
+        await waitUntil { service.isRecording }
+        chat.cancelDictation(in: "codex:call-7")
+
+        XCTAssertFalse(service.isRecording)
+        XCTAssertNil(chat.dictatingRoomID)
+        XCTAssertEqual(chat.workRooms.workRoom(id: "codex:call-7")?.composer.draft, "")
+        XCTAssertEqual(service.transcript, "")
+    }
+
+    @MainActor
+    func testPermissionGrantedAfterCancelDoesNotStartRecording() async {
+        final class Pending: @unchecked Sendable {
+            var callback: (@Sendable (Bool) -> Void)?
+        }
+        let pending = Pending()
+        let service = VoiceInputService(
+            transcriber: StubAudioTranscriber(result: .success("ignored")),
+            permissionRequester: { pending.callback = $0 },
+            recorderFactory: { _, _ in StubAudioRecorder() }
+        )
+
+        service.startRecording()
+        service.cancel()
+        pending.callback?(true)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertFalse(service.isRecording)
+        XCTAssertNil(service.errorMessage)
+        XCTAssertEqual(service.transcript, "")
+    }
+
+    @MainActor
+    private func makeDictationChat(voice: VoiceInputService) -> ChatViewModel {
+        let suiteName = "WorkRoomDictation.\(UUID().uuidString)"
+        guard let storage = UserDefaults(suiteName: suiteName) else {
+            preconditionFailure("Failed to create isolated UserDefaults suite")
+        }
+        storage.removePersistentDomain(forName: suiteName)
+        let configuration = GeneralAgentConfiguration(
+            name: "Dictation Agent",
+            connectionType: .byAddress,
+            addressConfiguration: nil,
+            avatarTextColorHex: "#FFFFFF",
+            avatarBackgroundColorHex: "#123456"
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Chat")
+        let chat = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: AppViewModel(storage: storage),
+            voiceInputService: voice
+        )
+        chat.handleIncomingEvent(
+            .workRoomFrame(
+                OIPServerFrame.decode([
+                    "type": .string("provider_invocation"),
+                    "invocationId": .string("codex:call-7"),
+                    "parentToolCallId": .string("call-7"),
+                    "provider": .string("codex"),
+                    "providerDisplayName": .string("Codex"),
+                    "taskTitle": .string("Build it"),
+                    "currentSummary": .string("Working"),
+                    "permissionMode": .string("manual"),
+                    "sessionId": .string("codex-session-1"),
+                    "status": .string("running"),
+                    "stateRevision": .number(1),
+                    "workroomId": .string("codex:call-7")
+                ])
+            )
+        )
+        return chat
     }
 
     private func makeRecordingService(

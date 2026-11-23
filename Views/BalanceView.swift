@@ -6,9 +6,10 @@
 //
 
 import SwiftUI
+import ConnectOnionKit
 
 /// Displays account balance, wallet credentials, and recovery phrase controls.
-struct BalanceAndAddressView: View {
+struct BalanceView: View {
     private enum CopyTarget: Equatable {
         case walletAddress
         case apiKey
@@ -16,9 +17,23 @@ struct BalanceAndAddressView: View {
     }
 
     @StateObject private var viewModel: BalanceViewModel
+    @ObservedObject var appViewModel: AppViewModel
     @State private var isAPIKeyRevealed = false
     @State private var copiedTarget: CopyTarget?
     @State private var copyFeedbackToken = UUID()
+
+    let onBack: () -> Void
+
+    /// `viewModel` is for tests and previews; the app lets the view make its own.
+    init(
+        appViewModel: AppViewModel,
+        viewModel: BalanceViewModel? = nil,
+        onBack: @escaping () -> Void
+    ) {
+        self.appViewModel = appViewModel
+        _viewModel = StateObject(wrappedValue: viewModel ?? BalanceViewModel())
+        self.onBack = onBack
+    }
 
     /// Wallet amounts are presented consistently as dollar-and-cents values.
     /// The underlying `Decimal` retains the full precision returned by `co status`.
@@ -34,13 +49,56 @@ struct BalanceAndAddressView: View {
         )
     }
 
-    init(viewModel: BalanceViewModel? = nil) {
-        _viewModel = StateObject(
-            wrappedValue: viewModel ?? BalanceViewModel()
-        )
+    var body: some View {
+        ZStack {
+            AppBackground()
+
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Button(action: onBack) {
+                                Image(systemName: "arrow.left")
+                                    .font(.system(size: AppFontSize.subheadline, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 28, height: 28)
+                                    .background(AppPalette.surfaceMuted)
+                                    .clipShape(Circle())
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Back")
+                            .help("Back")
+
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Settings")
+                                    .font(.system(size: AppFontSize.pageTitle, weight: .semibold))
+
+                                Text("Manage your ConnectOnion docker credentials, and credits")
+                                    .font(.system(size: AppFontSize.body))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        balanceBody
+                        DockerConfigurationView(
+                            dockerRuntime: DockerRuntimeManager.shared
+                        )
+
+                    }
+                    .frame(maxWidth: 920, alignment: .leading)
+                    .padding(.horizontal, geometry.size.width < 760 ? 20 : 32)
+                    .padding(.top, 32)
+                    .padding(.bottom, 48)
+                    .frame(maxWidth: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+        }
+        .navigationTitle("Balance")
     }
 
-    var body: some View {
+    private var balanceBody: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .top, spacing: 24) {
                 balanceCard
@@ -350,13 +408,12 @@ struct BalanceAndAddressView: View {
                 Button {
                     let recoveryPhrase = viewModel.recoveryWords.joined(separator: " ")
                     guard !recoveryPhrase.isEmpty else { return }
-                    NSPasteboard.general.clearContents()
-                    if NSPasteboard.general.setString(recoveryPhrase, forType: .string) {
+                    if SecretPasteboard.copy(recoveryPhrase) {
                         showCopyFeedback(for: .recoveryPhrase)
                     }
                 } label: {
                     if copiedTarget == .recoveryPhrase {
-                        Label("Copied", systemImage: "checkmark.circle.fill")
+                        Label(SecretPasteboard.copiedMessage, systemImage: "checkmark.circle.fill")
                             .font(.system(size: AppFontSize.body, weight: .semibold))
                             .foregroundStyle(AppPalette.success)
                             .frame(maxWidth: .infinity)
@@ -396,6 +453,7 @@ struct BalanceAndAddressView: View {
         isSensitive: Bool = false
     ) -> some View {
         let isCopied = copiedTarget == copyTarget
+        let copiedMessage = isSensitive ? SecretPasteboard.copiedMessage : "Copied"
 
         return VStack(alignment: .leading, spacing: 8) {
             Text(title.uppercased())
@@ -439,15 +497,22 @@ struct BalanceAndAddressView: View {
 
                 Button {
                     guard let copyValue, !copyValue.isEmpty else { return }
-                    NSPasteboard.general.clearContents()
-                    if NSPasteboard.general.setString(copyValue, forType: .string) {
+                    let copied: Bool
+                    if isSensitive {
+                        copied = SecretPasteboard.copy(copyValue)
+                    } else {
+                        NSPasteboard.general.clearContents()
+                        copied = NSPasteboard.general.setString(copyValue, forType: .string)
+                    }
+                    if copied {
                         showCopyFeedback(for: copyTarget)
                     }
                 } label: {
                     if isCopied {
-                        Label("Copied", systemImage: "checkmark.circle.fill")
+                        Label(copiedMessage, systemImage: "checkmark.circle.fill")
                             .font(.system(size: AppFontSize.footnote, weight: .semibold))
                             .foregroundStyle(AppPalette.success)
+                            .fixedSize()
                             .frame(height: 28)
                     } else {
                         Image(systemName: "doc.on.clipboard")
@@ -462,7 +527,7 @@ struct BalanceAndAddressView: View {
                 .opacity((copyValue?.isEmpty ?? true) ? 0.35 : 1)
                 .animation(.easeInOut(duration: 0.16), value: isCopied)
                 .accessibilityLabel(isCopied ? "\(title) copied" : "Copy \(title)")
-                .help(isCopied ? "Copied" : "Copy \(title)")
+                .help(isCopied ? copiedMessage : "Copy \(title)")
             }
             .padding(.horizontal, 16)
             .frame(minHeight: 46)
@@ -535,5 +600,104 @@ struct BalanceAndAddressView: View {
             return true
         }
         return false
+    }
+}
+
+/// Exposes the runtime `.env` and restarts Docker-managed agents after edits.
+struct DockerConfigurationView: View {
+    @ObservedObject var dockerRuntime: DockerRuntimeManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Docker configuration")
+                        .font(.system(size: AppFontSize.subheadline, weight: .semibold))
+
+                    Text(
+                        "Add provider API keys to the runtime .env, "
+                            + "then apply the configuration to restart every Agent."
+                    )
+                    .font(.system(size: AppFontSize.body))
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if dockerRuntime.status.isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Text(dockerRuntime.configurationFilePath)
+                .font(AppTypography.mono(size: AppFontSize.footnote))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+
+            HStack(spacing: 10) {
+                Button("Reveal .env") {
+                    dockerRuntime.revealConfigurationFile()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Copy Path") {
+                    dockerRuntime.copyConfigurationPath()
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
+
+                Button("Apply & Restart") {
+                    Task {
+                        await dockerRuntime.applyConfigurationAndRestart()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(dockerRuntime.status.isBusy)
+            }
+
+            if let message = dockerRuntime.configurationActionMessage {
+                Text(message)
+                    .font(.system(size: AppFontSize.footnote))
+                    .foregroundStyle(
+                        dockerRuntime.status.isError ? AppPalette.error : .secondary
+                    )
+            }
+        }
+        .padding(18)
+        .cardStyle(cornerRadius: 12)
+    }
+}
+
+/// Copies a secret so clipboard managers skip it, then clears it after a delay.
+enum SecretPasteboard {
+    /// The nspasteboard.org marker that clipboard managers and history tools skip.
+    static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+    static let copiedMessage = "Copied · clears in 60 s"
+
+    @discardableResult
+    static func copy(
+        _ secret: String,
+        to pasteboard: NSPasteboard = .general,
+        clearAfter delay: Duration = .seconds(60)
+    ) -> Bool {
+        pasteboard.clearContents()
+        guard pasteboard.setString(secret, forType: .string) else { return false }
+        pasteboard.setData(Data(), forType: concealedType)
+        let changeCount = pasteboard.changeCount
+        Task {
+            try? await Task.sleep(for: delay)
+            clearIfUnchanged(pasteboard, since: changeCount)
+        }
+        return true
+    }
+
+    /// Clears the pasteboard only if nothing else was copied since the secret.
+    static func clearIfUnchanged(_ pasteboard: NSPasteboard, since changeCount: Int) {
+        guard pasteboard.changeCount == changeCount else { return }
+        pasteboard.clearContents()
     }
 }
