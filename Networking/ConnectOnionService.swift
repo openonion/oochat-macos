@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import ConnectOnionKit
 
 /// Facade over the hosted-agent connection: validates 0x address and Direct URL
 /// targets, delegates the protocol lifecycle to the remote-agent client, and
@@ -23,7 +24,7 @@ final class ConnectOnionService: ObservableObject {
     /// Set optimistically once a target is accepted, before the probe completes.
     @Published var isConnected = false
     @Published var connectionError: String?
-    @Published var hostedAgentStatus = "Disconnected"
+    @Published var hostedAgentStatus = ConnectOnionService.notConnected
     @Published var hostedAgentStatusDetail: String?
     @Published var isHostedAgentStatusLive = false
     @Published var hostedFilesystemEnabled = false
@@ -35,9 +36,16 @@ final class ConnectOnionService: ObservableObject {
     @Published var desiredExecutionMode: AgentExecutionMode = .safe
     /// Mode the agent last acknowledged, via snapshot or a modeChanged event.
     @Published var confirmedExecutionMode: AgentExecutionMode = .safe
+    /// Modes that the host listed in CONNECTED. Empty until one arrives, so accept stays hidden.
+    @Published var availableExecutionModes: [AgentExecutionMode] = []
+    /// Turns left in accept mode, from mode_changed or CONNECTED; nil in other modes
+    @Published var acceptTurnsLeft: Int?
     /// True while a send or recovery is in flight; messages arriving meanwhile
     /// are fed into the running request as runtime input.
     @Published var isAgentRequestActive = false
+    /// Changes whenever the hosted agent client is replaced or dropped, so a held Work Room connection
+    /// follows the client it was opened for.
+    @Published private(set) var connectionGeneration = 0
     /// Blocks duplicate stop requests until the current step finishes or fails.
     @Published var isInterruptRequested = false
     /// True when the hosted agent has not confirmed cancellation promptly and
@@ -45,7 +53,20 @@ final class ConnectOnionService: ObservableObject {
     @Published private(set) var isInterruptEscalating = false
     private var interruptEscalationTask: Task<Void, Never>?
 
+    /// Session words come from the CO package so both apps say the same thing
+    static let notConnected = SessionStatusLabel.text(
+        state: .idle,
+        hasBookmark: false,
+        hostStatus: nil
+    )
     /// Single outbound stream of transport events (output, errors, approvals).
+    /// Set by the chat: whether the Work Room owns this `approval_needed` body.
+    var ownsProviderApproval: (([String: JSONValue]) -> Bool)?
+    /// Set by the chat: takes Work Room events (frames, snapshot, transport, drop) the moment they arrive, in
+    /// order, instead of through `incomingEvents`. The store is then current when the next `approval_needed` is
+    /// checked against it.
+    var onWorkRoomEvent: ((ConnectOnionTransportEvent) -> Void)?
+    private var isProviderApprovalOwned = false
     let incomingEvents = PassthroughSubject<ConnectOnionTransportEvent, Never>()
 
     init(
@@ -108,7 +129,13 @@ final class ConnectOnionService: ObservableObject {
             initialRemoteSessionID
         )
         remoteAgentClient = client
-        hostedAgentStatus = "Resolving"
+        connectionGeneration += 1
+        hostedAgentStatus = SessionStatusLabel.text(
+            state:
+                .connecting(attempt: 0),
+                hasBookmark: false,
+                hostStatus: nil
+        )
         hostedAgentStatusDetail = nil
         isHostedAgentStatusLive = false
         hostedFilesystemEnabled = false
@@ -117,6 +144,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = true
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         connectionError = nil
         isConnected = true
 
@@ -153,6 +182,22 @@ final class ConnectOnionService: ObservableObject {
                     )
                     self.isAgentRequestActive = false
                     self.isInterruptRequested = false
+                } else {
+                    // Fetch the authenticated profile without sending INPUT.
+                    // This is best-effort: failure must not mark the agent offline.
+                    do {
+                        try await client.loadAgentProfile(
+                            onEvent: { [weak self] event in
+                                guard let self,
+                                      self.remoteAgentClient === client else {
+                                    return
+                                }
+                                self.emit(event)
+                            }
+                        )
+                    } catch {
+                        // Keep using the public agent information if this fails.
+                    }
                 }
             } catch {
                 guard let self, self.remoteAgentClient === client else { return }
@@ -163,9 +208,30 @@ final class ConnectOnionService: ObservableObject {
         }
     }
 
+    /// Keeps a connection open for an open Work Room while no turn is running, so Provider Input can be
+    /// sent between turns. A connection that fails or drops is opened again, waiting 1 s and doubling up to
+    /// 30 s. Returns when a turn starts, the client is replaced, the user has to act (onboarding), or the
+    /// calling task is cancelled.
+    func holdWorkRoomConnection(
+        stationSessionID: String? = nil, inviteCode: String? = nil, handlesOnboarding: Bool = false
+    ) async {
+        var delay: Duration = .seconds(1)
+        while !Task.isCancelled, !isAgentRequestActive, let client = remoteAgentClient {
+            let shouldRetry = await client.holdWorkRoomConnection(
+                stationSessionID: stationSessionID, inviteCode: inviteCode, handlesOnboarding: handlesOnboarding
+            ) { [weak self] event in
+                guard let self, self.remoteAgentClient === client else { return }
+                self.emit(event)
+            }
+            guard shouldRetry, remoteAgentClient === client else { return }
+            try? await Task.sleep(for: delay)
+            delay = min(delay * 2, .seconds(30))
+        }
+    }
+
     func disconnect() {
         stopRemoteAgent()
-        hostedAgentStatus = "Disconnected"
+        hostedAgentStatus = Self.notConnected
         hostedAgentStatusDetail = nil
         isHostedAgentStatusLive = false
         hostedFilesystemEnabled = false
@@ -174,6 +240,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = false
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         isAgentRequestActive = false
         isInterruptRequested = false
         currentConfiguration = nil
@@ -248,6 +316,9 @@ final class ConnectOnionService: ObservableObject {
             incomingEvents.send(.output(response))
 
             connectionError = nil
+        } catch ConnectOnionRemoteError.stationOnly {
+            connectionError = nil
+            incomingEvents.send(.stationRefusedChat)
         } catch ConnectOnionRemoteError.interrupted {
             hostedAgentStatus = "Connected"
             hostedAgentStatusDetail = "Stopped by user"
@@ -261,8 +332,22 @@ final class ConnectOnionService: ObservableObject {
                 hostedAgentStatusDetail = error.localizedDescription
                 isHostedAgentStatusLive = false
             }
-            incomingEvents.send(.error(error.localizedDescription))
+            // -32010 gets its own screen. Every other failure keeps the old error event.
+            if let incompatibility = (error as? ConnectOnionRemoteError)?.incompatibility {
+                incomingEvents.send(.incompatible(incompatibility))
+            } else {
+                incomingEvents.send(.error(error.localizedDescription))
+            }
         }
+    }
+
+    /// Cuts the agent's saved session back to before your latest message, so the next send
+    /// redoes that turn. False while a run is going or when there is nothing to rewind.
+    func rewindLatestTurn(prompt: String) async -> Bool {
+        guard !isAgentRequestActive, let remoteAgentClient else {
+            return false
+        }
+        return await remoteAgentClient.rewindLatestTurn(prompt: prompt)
     }
 
     /// Asks the agent to stop after it finishes the current step; returns false
@@ -403,9 +488,29 @@ final class ConnectOnionService: ObservableObject {
     /// Forwards transport events to the UI, mirroring mode changes and, while in
     /// accept mode, answering approval requests without surfacing them.
     private func emit(_ event: ConnectOnionTransportEvent) {
-        if case .modeChanged(let mode) = event {
+        // The Work Room answers a Provider approval; its hosted prompt (and accept mode's auto-answer) is skipped.
+        if case .workRoomFrame(.event(type: "approval_needed", _, let body)) = event {
+            isProviderApprovalOwned = ownsProviderApproval?(body) ?? false
+        }
+        if case .approvalRequired = event, isProviderApprovalOwned {
+            isProviderApprovalOwned = false
+            return
+        }
+        if event.isWorkRoomEvent, let onWorkRoomEvent {
+            onWorkRoomEvent(event)
+            return
+        }
+        if case .modeChanged(let mode, let turnsLeft) = event {
             desiredExecutionMode = mode
             confirmedExecutionMode = mode
+            acceptTurnsLeft = mode == .accept ? turnsLeft : nil
+        }
+        if case .sessionModes(let available, let current, let turnsLeft) = event {
+            availableExecutionModes = available
+            if let current {
+                confirmedExecutionMode = current
+            }
+            acceptTurnsLeft = current == .accept ? turnsLeft : nil
         }
         if case .approvalRequired = event,
            desiredExecutionMode == .accept {
@@ -435,6 +540,9 @@ final class ConnectOnionService: ObservableObject {
     private func stopRemoteAgent() {
         let client = remoteAgentClient
         remoteAgentClient = nil
+        connectionGeneration += 1
+        // The old client's events are ignored from here on, so the store is told directly.
+        emit(.workRoomConnectionDropped)
         if let client {
             Task {
                 await client.disconnect()
@@ -444,7 +552,7 @@ final class ConnectOnionService: ObservableObject {
 
     private func setConnectionFailure(_ message: String) {
         stopRemoteAgent()
-        hostedAgentStatus = "Disconnected"
+        hostedAgentStatus = Self.notConnected
         hostedAgentStatusDetail = nil
         isHostedAgentStatusLive = false
         hostedFilesystemEnabled = false
@@ -453,6 +561,8 @@ final class ConnectOnionService: ObservableObject {
         hostedExecutionModesEnabled = false
         desiredExecutionMode = .safe
         confirmedExecutionMode = .safe
+        availableExecutionModes = []
+        acceptTurnsLeft = nil
         isAgentRequestActive = false
         isInterruptRequested = false
         currentConfiguration = nil

@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import SwiftUI
 import XCTest
 @testable import ConnectOnionMacClient
@@ -45,6 +46,84 @@ extension ChatViewTests {
         )
 
         render(viewModel)
+    }
+
+    @MainActor
+    func testProviderInvocationShowsWorkRoomCardInPlaceOfItsToolCall() {
+        var run = ExecutionRun(sessionId: UUID(), userMessageId: nil)
+        run.items = [
+            .toolCall(ToolCallExecutionItem(id: "call-7", name: "run_codex", args: [:], status: .running))
+        ]
+        let viewModel = makeViewModel(
+            messages: [ChatMessage(sessionId: UUID(), role: .user, content: "Build it")],
+            executionRuns: [run]
+        )
+        // The Kit fixture provider_invocation.json, through the app's frame path.
+        viewModel.handleIncomingEvent(
+            .workRoomFrame(
+                OIPServerFrame.decode([
+                    "type": .string("provider_invocation"),
+                    "invocationId": .string("codex:call-7"),
+                    "parentToolCallId": .string("call-7"),
+                    "provider": .string("codex"),
+                    "providerDisplayName": .string("Codex"),
+                    "taskTitle": .string("Build and verify the requested C program"),
+                    "currentSummary": .string("Working in the selected workspace"),
+                    "permissionMode": .string("manual"),
+                    "sessionId": .string("codex-session-1"),
+                    "status": .string("running"),
+                    "stateRevision": .number(1),
+                    "workroomId": .string("codex:call-7")
+                ])
+            )
+        )
+
+        let entries = ChatViewPresentation.traceEntries(
+            viewModel.executionRuns.flatMap(\.items),
+            workRooms: viewModel.workRooms
+        )
+        XCTAssertEqual(entries.map(\.id), ["call-7"])
+        guard case .workRoom(let workRoom)? = entries.first else {
+            return XCTFail("the outer tool call should be replaced by a Work Room Card")
+        }
+        XCTAssertEqual(workRoom.toolCallID, "call-7")
+        XCTAssertEqual(workRoom.title, "Build and verify the requested C program")
+        XCTAssertEqual(workRoom.status, .running)
+        render(viewModel)
+    }
+
+    @MainActor
+    func testReconnectSnapshotBuildsWorkRoomCardWithoutLiveFrames() throws {
+        var run = ExecutionRun(sessionId: UUID(), userMessageId: nil)
+        run.items = [
+            .toolCall(ToolCallExecutionItem(id: "call-7", name: "run_codex", args: [:], status: .running))
+        ]
+        let viewModel = makeViewModel(
+            messages: [ChatMessage(sessionId: UUID(), role: .user, content: "Build it")],
+            executionRuns: [run]
+        )
+        let connected = Data(
+            """
+            {"type":"CONNECTED","status":"connected","server_newer":true,"chat_items":[
+              {"id":"codex:call-7","type":"provider_invocation","invocationId":"codex:call-7",
+               "parentToolCallId":"call-7","provider":"codex","status":"running","stateRevision":3,
+               "taskTitle":"Build and verify the requested C program"}]}
+            """.utf8
+        )
+        guard case .established(let snapshot) = try OIPHandshake.interpret(connected) else {
+            return XCTFail("CONNECTED should establish the connection")
+        }
+
+        viewModel.handleIncomingEvent(.workRoomSnapshot(snapshot))
+
+        let entries = ChatViewPresentation.traceEntries(
+            viewModel.executionRuns.flatMap(\.items),
+            workRooms: viewModel.workRooms
+        )
+        guard case .workRoom(let workRoom)? = entries.first else {
+            return XCTFail("the snapshot should rebuild the Work Room Card")
+        }
+        XCTAssertEqual(workRoom.title, "Build and verify the requested C program")
     }
 
     @MainActor
@@ -137,7 +216,7 @@ extension ChatViewTests {
 
         XCTAssertEqual(request.riskLevel, .high)
         XCTAssertEqual(request.targetSummary, "/workspace/secret.txt")
-        XCTAssertEqual(request.plainEnglishExplanation, "Delete secret.txt.")
+        XCTAssertEqual(request.kitSummary, "Delete secret.txt.")
     }
 
     @MainActor
@@ -153,7 +232,7 @@ extension ChatViewTests {
             batchRemaining: []
         )
         XCTAssertEqual(
-            write.plainEnglishExplanation,
+            write.kitSummary,
             "Create or replace hi.md with the content supplied by the agent."
         )
 
@@ -166,7 +245,7 @@ extension ChatViewTests {
         )
         XCTAssertEqual(command.commandText, "git status --short")
         XCTAssertEqual(
-            command.plainEnglishExplanation,
+            command.kitSummary,
             "Run a Git status operation in the repository."
         )
     }
@@ -377,4 +456,18 @@ extension ChatViewTests {
         XCTAssertEqual(result.map(\.id), [visible.id])
     }
 
+    // Within 80 pt of the bottom new messages keep you there; 1.5 windows up, Jump to latest shows.
+    func testChatScrollPositionFollowsNearTheBottomAndOffersJumpWellUp() {
+        let atBottom = ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_950, viewportHeight: 600)
+        XCTAssertTrue(atBottom.isAtBottom)
+        XCTAssertFalse(atBottom.isFarFromLatest)
+
+        let justUp = ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_800, viewportHeight: 600)
+        XCTAssertFalse(justUp.isAtBottom)
+        XCTAssertFalse(justUp.isFarFromLatest, "200 pt up is less than 1.5 windows")
+
+        let wellUp = ChatScrollPosition(contentHeight: 3_000, visibleBottom: 1_000, viewportHeight: 600)
+        XCTAssertFalse(wellUp.isAtBottom)
+        XCTAssertTrue(wellUp.isFarFromLatest)
+    }
 }

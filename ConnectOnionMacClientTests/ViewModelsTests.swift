@@ -168,6 +168,53 @@ final class ViewModelsTests: XCTestCase {
     }
 
     @MainActor
+    func testNewChatIsDraftUntilFirstMessageIsSent() async throws {
+        let storage = makeIsolatedDefaults()
+        let viewModel = AppViewModel(storage: storage, localAgentDefinitions: [])
+        let configuration = makeHostedConfiguration()
+        viewModel.configurations = [configuration]
+
+        viewModel.createNewSession(for: configuration)
+        let draft = try XCTUnwrap(viewModel.sessions.first)
+
+        // Selected, but hidden from the sidebar and not persisted.
+        XCTAssertEqual(viewModel.selection, .session(draft.id))
+        XCTAssertTrue(viewModel.visibleSessions.isEmpty)
+        XCTAssertTrue(
+            AppViewModel(storage: storage, localAgentDefinitions: [])
+                .sessions.isEmpty
+        )
+
+        viewModel.addMessage(
+            ChatMessage(sessionId: draft.id, role: .user, content: "Hello")
+        )
+
+        XCTAssertEqual(viewModel.visibleSessions.map(\.id), [draft.id])
+        XCTAssertEqual(
+            AppViewModel(storage: storage, localAgentDefinitions: [])
+                .sessions.map(\.id),
+            [draft.id]
+        )
+    }
+
+    @MainActor
+    func testRepeatedNewChatReusesDraftAndLeavingDiscardsIt() async throws {
+        let viewModel = AppViewModel(
+            storage: makeIsolatedDefaults(),
+            localAgentDefinitions: []
+        )
+        let configuration = makeHostedConfiguration()
+        viewModel.configurations = [configuration]
+
+        viewModel.createNewSession(for: configuration)
+        viewModel.createNewSession(for: configuration)
+        XCTAssertEqual(viewModel.sessions.count, 1)
+
+        viewModel.selection = nil
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+    }
+
+    @MainActor
     func testCreateSessionSelectsItAndTitleUpdatesAreNormalized() async throws {
         let viewModel = makeViewModel()
         let configuration = makeHostedConfiguration()
@@ -438,6 +485,17 @@ final class ViewModelsTests: XCTestCase {
             try JSONEncoder().encode([session]),
             forKey: "saved_sessions"
         )
+        // Sessions without messages are drafts and are discarded on load.
+        storage.set(
+            try JSONEncoder().encode([
+                ChatMessage(
+                    sessionId: session.id,
+                    role: .user,
+                    content: "Legacy message"
+                )
+            ]),
+            forKey: "saved_messages"
+        )
         storage.set(
             try JSONSerialization.data(withJSONObject: [
                 "sessionID": "legacy-remote-session"
@@ -521,6 +579,24 @@ final class ViewModelsTests: XCTestCase {
 
         viewModel.setAgentConnected(configuration, isConnected: false)
         XCTAssertFalse(viewModel.isAgentConnected(configuration))
+    }
+
+    @MainActor
+    func testWorkRoomBarrierScopeIsStablePerChat() {
+        let viewModel = makeViewModel()
+        let agentId = UUID()
+        let first = ChatSession(agentConfigId: agentId, agentIdentity: "0xabc", title: "One")
+        let second = ChatSession(agentConfigId: agentId, agentIdentity: "0xabc", title: "Two")
+        let reloaded = first
+
+        XCTAssertNotEqual(
+            viewModel.workRoomBarrierScope(for: first),
+            viewModel.workRoomBarrierScope(for: second)
+        )
+        XCTAssertEqual(
+            viewModel.workRoomBarrierScope(for: first),
+            viewModel.workRoomBarrierScope(for: reloaded)
+        )
     }
 
     @MainActor

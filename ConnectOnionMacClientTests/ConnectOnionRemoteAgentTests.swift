@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 import XCTest
@@ -30,7 +31,7 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
     }
 
     func testJSONValueConvertsEverySupportedFoundationShapeAndRoundTrips() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "string": "value",
                 "boolean": true,
@@ -56,11 +57,11 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
 
         let encoded = try JSONEncoder().encode(value)
         XCTAssertEqual(
-            try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded),
+            try JSONDecoder().decode(JSONValue.self, from: encoded),
             value
         )
         XCTAssertTrue(value.displayText.contains("\"boolean\" : true"))
-        XCTAssertEqual(ConnectOnionJSONValue(any: NSNull()), .null)
+        XCTAssertEqual(JSONValue(any: NSNull()), .null)
     }
 
     func testRelayReachabilityCoversExplicitAndInferredRoutes() throws {
@@ -101,20 +102,17 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
 
     func testExecutionModesAndInteractionDecisionsProduceProtocolPayloads() {
         XCTAssertEqual(AgentExecutionMode.allCases, [.safe, .plan, .accept])
-        XCTAssertEqual(AgentExecutionMode.safe.helpText, "Dangerous tools require approval")
-        XCTAssertEqual(
-            AgentExecutionMode.plan.helpText,
-            "Read-only exploration followed by a plan review"
-        )
-        XCTAssertTrue(AgentExecutionMode.accept.helpText.contains("10 turns"))
+        XCTAssertEqual(AgentExecutionMode.safe.helpText, "Review each action and approve safe work automatically.")
+        XCTAssertEqual(AgentExecutionMode.plan.helpText, "Ask before any change.")
+        XCTAssertTrue(AgentExecutionMode.accept.helpText.contains("turns shown"))
         XCTAssertEqual(AgentExecutionMode.safe.systemImage, "checkmark.shield.fill")
         XCTAssertEqual(AgentExecutionMode.plan.systemImage, "list.clipboard.fill")
         XCTAssertEqual(AgentExecutionMode.accept.systemImage, "bolt.shield.fill")
-        XCTAssertEqual(AgentExecutionMode.safe.confirmationText, "Safe mode enabled")
-        XCTAssertEqual(AgentExecutionMode.plan.confirmationText, "Plan mode enabled")
+        XCTAssertEqual(AgentExecutionMode.safe.confirmationText, "Auto enabled")
+        XCTAssertEqual(AgentExecutionMode.plan.confirmationText, "Read only enabled")
         XCTAssertEqual(
             AgentExecutionMode.accept.confirmationText,
-            "Accept enabled for up to 10 turns"
+            "Full access enabled"
         )
 
         let planApproval = ConnectOnionPlanReviewDecision.approve.message
@@ -139,34 +137,12 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
             ConnectOnionULWCheckpointDecision.returnToSafe.message["mode"] as? String,
             "safe"
         )
-        XCTAssertEqual(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: nil
-            )["type"] as? String,
-            "INTERRUPT"
-        )
-        XCTAssertNotNil(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: nil
-            )["requested_at_ms"] as? Int
-        )
-        XCTAssertNil(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(inputID: nil)["input_id"],
-            "With no active run there is no input_id to correlate."
-        )
-        XCTAssertEqual(
-            ConnectOnionRemoteAgentClient.buildInterruptMessage(
-                inputID: "input-42"
-            )["input_id"] as? String,
-            "input-42",
-            "The interrupt must name the run it targets so the peer can echo it back."
-        )
     }
 
     func testApprovalRequestsExplainEverySupportedOperation() {
         func request(
             _ tool: String,
-            arguments: [String: ConnectOnionJSONValue] = [:]
+            arguments: [String: JSONValue] = [:]
         ) -> ConnectOnionApprovalRequest {
             ConnectOnionApprovalRequest(
                 id: UUID().uuidString,
@@ -200,10 +176,10 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
         )
         XCTAssertEqual(laterTarget.targetSummary, "person@example.test")
         XCTAssertTrue(
-            laterTarget.plainEnglishExplanation.contains("person@example.test")
+            laterTarget.kitSummary.contains("person@example.test")
         )
         XCTAssertEqual(
-            request("reply_to_message").plainEnglishExplanation,
+            request("reply_to_message").kitSummary,
             "Send information to an external recipient."
         )
 
@@ -211,35 +187,35 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
             request(
                 "delete_file",
                 arguments: ["path": .string("/tmp/report.txt")]
-            ).plainEnglishExplanation,
-            request("remove_item").plainEnglishExplanation,
+            ).kitSummary,
+            request("remove_item").kitSummary,
             request(
                 "write_file",
                 arguments: ["filename": .string("/tmp/output.txt")]
-            ).plainEnglishExplanation,
-            request("write_file").plainEnglishExplanation,
+            ).kitSummary,
+            request("write_file").kitSummary,
             request(
                 "edit_file",
                 arguments: ["filepath": .string("/tmp/source.swift")]
-            ).plainEnglishExplanation,
-            request("patch_resource").plainEnglishExplanation,
+            ).kitSummary,
+            request("patch_resource").kitSummary,
             request(
                 "create_file",
                 arguments: ["target": .string("/tmp/new.txt")]
-            ).plainEnglishExplanation,
-            request("create_resource").plainEnglishExplanation,
+            ).kitSummary,
+            request("create_resource").kitSummary,
             request(
                 "rename_file",
                 arguments: ["file_path": .string("/tmp/old.txt")]
-            ).plainEnglishExplanation,
-            request("move_resource").plainEnglishExplanation,
+            ).kitSummary,
+            request("move_resource").kitSummary,
             request(
                 "upload_file",
                 arguments: ["url": .string("https://uploads.test")]
-            ).plainEnglishExplanation,
-            request("upload_file").plainEnglishExplanation,
-            request("click_element").plainEnglishExplanation,
-            request("custom_tool").plainEnglishExplanation
+            ).kitSummary,
+            request("upload_file").kitSummary,
+            request("click_element").kitSummary,
+            request("custom_tool").kitSummary
         ]
         XCTAssertEqual(explanations.count, 14)
         XCTAssertTrue(explanations[0].contains("report.txt"))
@@ -280,7 +256,7 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
                 arguments: ["command": .string(command)]
             )
             XCTAssertTrue(
-                approval.plainEnglishExplanation.contains(expectedText),
+                approval.kitSummary.contains(expectedText),
                 "Expected \(command) to contain \(expectedText)"
             )
         }
@@ -374,6 +350,13 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
             .init(
                 error: .server("Server rejected the request"),
                 description: "Server rejected the request",
+                isRetryable: false
+            ),
+            .init(
+                error: .incompatibleProtocol(
+                    OIPHandshake.Incompatibility(neededVersion: "0.2", appVersion: "0.1")
+                ),
+                description: "This agent needs OIP 0.2. This app speaks OIP 0.1. Update the app to connect.",
                 isRetryable: false
             )
         ]
@@ -471,4 +454,67 @@ final class ConnectOnionRemoteAgentTests: XCTestCase {
         )
     }
 
+}
+
+extension ConnectOnionRemoteAgentTests {
+    func testDefaultSocketAcceptsTheHostsLargestMessage() throws {
+        let socketURL = try XCTUnwrap(URL(string: "wss://agent.test/ws"))
+        let task = URLSession.shared.webSocketTask(with: socketURL)
+        defer { task.cancel() }
+        XCTAssertEqual(
+            task.maximumMessageSize,
+            1_048_576,
+            "URLSession's default, which a large snapshot would exceed"
+        )
+        let made = ConnectOnionRemoteAgentClient.defaultWebSocket(urlSession: .shared)(socketURL)
+        let configured = try XCTUnwrap(made as? URLSessionWebSocketTask)
+        defer { configured.cancel() }
+        XCTAssertEqual(configured.maximumMessageSize, OIPDashboard.socketMessageBytes)
+    }
+
+    func testDashboardSnapshotsReachTheChatAndAnOversizedOneIsTooLarge() async throws {
+        let address = makeAddress("a5")
+        let resolver = makeResolver { request in
+            (
+                makeHTTPResponse(for: request, statusCode: 200),
+                try makeJSONData(["name": "Dashboard Agent", "address": address])
+            )
+        }
+        let oversized = String(repeating: "a", count: OIPDashboard.clientCapBytes + 1)
+        let socket = try ScriptedWebSocketTask(events: [
+            ["type": "CONNECTED", "status": "connected", "session_id": "dashboard-session"],
+            ["type": "DASHBOARD_SNAPSHOT", "html": "<h1>Hi</h1>"],
+            ["type": "DASHBOARD_SNAPSHOT", "html": oversized],
+            ["type": "OUTPUT", "result": "done"]
+        ])
+        let client = ConnectOnionRemoteAgentClient(
+            configuredTarget: "https://agent.test",
+            conversationID: nil,
+            resolver: resolver,
+            identityStore: makeEphemeralIdentityStore(),
+            webSocketFactory: { _ in socket },
+            sleep: { _ in }
+        )
+        let recorder = RemoteProtocolRecorder()
+        let output = try await client.send(
+            prompt: "Show me",
+            onUpdate: { await recorder.record($0) },
+            onEvent: { await recorder.record($0) }
+        )
+
+        XCTAssertEqual(output, "done", "a page over the cap must not end the run")
+
+        let events = await recorder.snapshot().events
+
+        XCTAssertTrue(events.contains("dashboard:11"))
+        XCTAssertTrue(events.contains("dashboard_too_large:\(OIPDashboard.clientCapBytes + 1)"))
+    }
+}
+
+/// The Mac card titles approvals with the Kit summary, so these tests check that the Kit keeps
+/// the sentences the Mac app used to build itself.
+extension ConnectOnionApprovalRequest {
+    var kitSummary: String {
+        OOApprovalDisclosure.summary(tool: tool, arguments: arguments.objectValue ?? [:])
+    }
 }

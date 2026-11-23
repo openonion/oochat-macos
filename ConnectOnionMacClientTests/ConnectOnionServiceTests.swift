@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import CryptoKit
 import XCTest
 @testable import ConnectOnionMacClient
@@ -10,7 +11,7 @@ final class ConnectOnionServiceTests: XCTestCase {
 
             XCTAssertFalse(service.isConnected)
             XCTAssertNil(service.connectionError)
-            XCTAssertEqual(service.hostedAgentStatus, "Disconnected")
+            XCTAssertEqual(service.hostedAgentStatus, "Not Connected")
             XCTAssertFalse(service.isHostedAgentStatusLive)
             XCTAssertFalse(service.hostedFilesystemEnabled)
             XCTAssertNil(service.hostedWorkspacePath)
@@ -228,6 +229,38 @@ final class ConnectOnionServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testDisconnectingTellsTheWorkRoomStoreItsConnectionIsGone() async {
+        let address = "0x" + String(repeating: "ad", count: 32)
+        let endpoint = ConnectOnionResolvedEndpoint(
+            agentAddress: address,
+            webSocketURL: URL(string: "wss://agent.test/ws")!,
+            httpBaseURL: URL(string: "https://agent.test")!,
+            isDirect: true,
+            info: nil
+        )
+        let stub = await StubRemoteAgentClient(endpoint: endpoint)
+        let service = ConnectOnionService(remoteAgentFactory: { _, _, _ in stub })
+        let configuration = GeneralAgentConfiguration(
+            name: "Hosted Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        var dropped = false
+        let cancellable = service.incomingEvents.sink {
+            if case .workRoomConnectionDropped = $0 { dropped = true }
+        }
+        service.connect(with: configuration)
+        await waitUntil { service.isHostedAgentStatusLive }
+        let generation = service.connectionGeneration
+
+        service.disconnect()
+
+        XCTAssertTrue(dropped)
+        XCTAssertNotEqual(service.connectionGeneration, generation)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    @MainActor
     func testAcceptAutoApprovesStaleRequestsWithoutPublishingPrompt() async {
         let address = "0x" + String(repeating: "ac", count: 32)
         let endpoint = ConnectOnionResolvedEndpoint(
@@ -272,6 +305,136 @@ final class ConnectOnionServiceTests: XCTestCase {
 
         XCTAssertFalse(receivedApprovalPrompt)
         XCTAssertEqual(service.desiredExecutionMode, .accept)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    @MainActor
+    func testOwnedProviderApprovalIsNotAutoAnsweredButGenericOneStillIs() async {
+        let address = "0x" + String(repeating: "6a", count: 32)
+        let endpoint = ConnectOnionResolvedEndpoint(
+            agentAddress: address,
+            webSocketURL: URL(string: "wss://agent.test/ws")!,
+            httpBaseURL: URL(string: "https://agent.test")!,
+            isDirect: true,
+            info: nil
+        )
+        func approval(_ id: String) -> ConnectOnionTransportEvent {
+            .approvalRequired(
+                ConnectOnionApprovalRequest(id: id, tool: "bash", arguments: .object([:]), description: nil, batchRemaining: [])
+            )
+        }
+        func frame(_ id: String, provider: String?) -> ConnectOnionTransportEvent {
+            .workRoomFrame(.event(type: "approval_needed", id: id, body: provider.map { ["provider": .string($0)] } ?? [:]))
+        }
+        let stub = await StubRemoteAgentClient(
+            endpoint: endpoint,
+            eventsOnSend: [frame("owned", provider: "codex"), approval("owned"), frame("generic", provider: nil), approval("generic")]
+        )
+        let service = ConnectOnionService(remoteAgentFactory: { _, _, _ in stub })
+        service.ownsProviderApproval = { $0["provider"] != nil }
+        let configuration = GeneralAgentConfiguration(
+            name: "Hosted Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        service.connect(with: configuration)
+        await waitUntil { service.isHostedAgentStatusLive }
+        await service.sendMessage("Go", localMessageID: UUID(), using: configuration)
+        // The stub switches to accept mode, which answers a hosted approval on its own.
+        await waitUntil { await stub.callSnapshot().contains("approval:approveOnce") }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let answers = await stub.callSnapshot().filter { $0.hasPrefix("approval:") }
+        XCTAssertEqual(answers, ["approval:approveOnce"])
+    }
+
+    // The invocation frame that makes a Provider approval known reaches the store before the approval is checked,
+    // so the outer approval prompt never appears for it, even in a burst.
+    @MainActor
+    func testWorkRoomFramesReachTheStoreBeforeTheNextApprovalIsChecked() async throws {
+        let address = "0x" + String(repeating: "6b", count: 32)
+        let endpoint = ConnectOnionResolvedEndpoint(
+            agentAddress: address,
+            webSocketURL: URL(string: "wss://agent.test/ws")!,
+            httpBaseURL: URL(string: "https://agent.test")!,
+            isDirect: true,
+            info: nil
+        )
+        func frame(_ json: String) throws -> ConnectOnionTransportEvent {
+            .workRoomFrame(OIPServerFrame.decode(try JSONDecoder().decode([String: JSONValue].self, from: Data(json.utf8))))
+        }
+        let invocation = try frame("""
+            {"type":"provider_invocation","invocationId":"codex:call-7","parentToolCallId":"call-7","provider":"codex",
+             "status":"awaiting_approval","stateRevision":2,"workroomId":"codex:call-7"}
+            """)
+        let approval = try frame("""
+            {"type":"approval_needed","id":"approval-1","tool":"codex","arguments":{},"provider":"codex",
+             "invocationId":"codex:call-7","parentToolCallId":"call-7","providerApproval":{"action":"Inspect the workspace",
+             "scope":"This Work Room only","reason":"Check the requested workspace result before continuing",
+             "scopeClassification":"workroom","allowOnce":true,"allowSession":false,"files":[]}}
+            """)
+        let prompt = ConnectOnionTransportEvent.approvalRequired(
+            ConnectOnionApprovalRequest(id: "approval-1", tool: "codex", arguments: .object([:]), description: nil, batchRemaining: [])
+        )
+        let stub = await StubRemoteAgentClient(endpoint: endpoint, eventsOnSend: [invocation, approval, prompt])
+        let service = ConnectOnionService(remoteAgentFactory: { _, _, _ in stub })
+        let store = WorkRoomStore()
+        service.ownsProviderApproval = { store.ownsApproval($0) }
+        service.onWorkRoomEvent = { if case .workRoomFrame(let frame) = $0 { store.receive(frame) } }
+        var receivedApprovalPrompt = false
+        let cancellable = service.incomingEvents.sink {
+            if case .approvalRequired = $0 { receivedApprovalPrompt = true }
+        }
+        let configuration = GeneralAgentConfiguration(
+            name: "Hosted Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        service.connect(with: configuration)
+        await waitUntil { service.isHostedAgentStatusLive }
+        await service.sendMessage("Go", localMessageID: UUID(), using: configuration)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(receivedApprovalPrompt)
+        XCTAssertNotNil(store.workRoom(id: "codex:call-7")?.approval)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    // 16.2: CONNECTED confirms only the host's side, so a requested mode stays pending.
+    @MainActor
+    func testSessionModesKeepARequestPendingAndTurnsLeftFollowsAccept() async {
+        let address = "0x" + String(repeating: "16", count: 32)
+        let stub = await StubRemoteAgentClient(
+            endpoint: ConnectOnionResolvedEndpoint(
+                agentAddress: address,
+                webSocketURL: URL(string: "wss://agent.test/ws")!,
+                httpBaseURL: URL(string: "https://agent.test")!,
+                isDirect: true,
+                info: nil
+            ),
+            eventsOnSend: [
+                .modeChanged(.accept, turnsLeft: 4),
+                .sessionModes(available: [.safe, .plan, .accept], current: .safe, turnsLeft: nil)
+            ]
+        )
+        let service = ConnectOnionService(remoteAgentFactory: { _, _, _ in stub })
+        let configuration = GeneralAgentConfiguration(
+            name: "Mode Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        var turnsSeen: [Int?] = []
+        let cancellable = service.$acceptTurnsLeft.sink { turnsSeen.append($0) }
+
+        service.connect(with: configuration)
+        await waitUntil { service.isHostedAgentStatusLive }
+        await service.sendMessage("Go", localMessageID: UUID(), using: configuration)
+        await waitUntil { service.availableExecutionModes.contains(.accept) }
+
+        XCTAssertTrue(turnsSeen.contains(4), "turns_left shows while in accept")
+        XCTAssertEqual(service.desiredExecutionMode, .accept, "CONNECTED does not overwrite the request")
+        XCTAssertEqual(service.confirmedExecutionMode, .safe)
+        XCTAssertNil(service.acceptTurnsLeft, "no turns left outside accept")
         withExtendedLifetime(cancellable) {}
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import Foundation
 import SwiftUI
 
@@ -59,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ConnectOnionMacClientApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        OOFonts.register()
+    }
 
     var body: some Scene {
         WindowGroup {

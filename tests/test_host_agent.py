@@ -277,6 +277,11 @@ def load_host_agent_module():
         "connectonion.useful_plugins.tool_approval"
     ] = fake_tool_approval_package
     sys.modules["connectonion.useful_plugins.ulw"] = fake_ulw_package
+    fake_re_act = types.ModuleType("connectonion.useful_plugins.re_act")
+    fake_re_act._format_conversation = lambda messages: "\n".join(
+        f"{message['role']}: {message['content']}" for message in messages
+    )
+    sys.modules["connectonion.useful_plugins.re_act"] = fake_re_act
     sys.modules[
         "connectonion.useful_plugins.tool_approval.constants"
     ] = fake_tool_approval_constants
@@ -1599,6 +1604,30 @@ class AgentFactoryTests(unittest.TestCase):
                 "internal": True,
             },
         )
+
+    def test_acknowledge_request_sees_earlier_chat_turns(self):
+        host_agent.os.environ.pop("CONNECTONION_ACKNOWLEDGE", None)
+        agent, _ = self._acknowledge_agent("do it")
+        agent.current_session["messages"] = [
+            {"role": "system", "content": "SYSTEM PROMPT"},
+            {"role": "user", "content": "rename the config loader"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "assistant", "content": "OLD ACK", "internal": True},
+            {"role": "assistant", "content": "Want me to rename it to load_config?"},
+            {"role": "user", "content": "do it"},
+        ]
+        prompts = []
+        original_llm_do = host_agent.llm_do
+        host_agent.llm_do = lambda prompt, **kwargs: prompts.append(prompt) or "Got it."
+        try:
+            host_agent.acknowledge_request(agent)
+        finally:
+            host_agent.llm_do = original_llm_do
+
+        self.assertIn("user: rename the config loader", prompts[0])
+        self.assertIn("assistant: Want me to rename it to load_config?", prompts[0])
+        self.assertNotIn("SYSTEM PROMPT", prompts[0])
+        self.assertNotIn("OLD ACK", prompts[0])
 
     def test_acknowledge_request_skips_trivial_input_and_when_disabled(self):
         host_agent.os.environ.pop("CONNECTONION_ACKNOWLEDGE", None)
