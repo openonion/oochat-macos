@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// Where the active request stands; persisted so a relaunch knows whether
@@ -18,6 +19,9 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
     var executionState: ConnectOnionRemoteExecutionState = .idle
     var activeInputID: String?
     var inputWasSent = false
+    /// The text of the active INPUT. After a relaunch, a turn that finished while the app
+    /// was closed is accepted only if the host's last user message is this prompt.
+    var activePrompt: String?
     /// Survives view/service recreation so a cancelled run is never recovered.
     var wasInterrupted = false
     var desiredMode: AgentExecutionMode = .safe
@@ -30,6 +34,7 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
         case executionState
         case activeInputID
         case inputWasSent
+        case activePrompt
         case wasInterrupted
         case desiredMode
         case confirmedMode
@@ -50,6 +55,7 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
         ) ?? .idle
         activeInputID = try container.decodeIfPresent(String.self, forKey: .activeInputID)
         inputWasSent = try container.decodeIfPresent(Bool.self, forKey: .inputWasSent) ?? false
+        activePrompt = try container.decodeIfPresent(String.self, forKey: .activePrompt)
         wasInterrupted = try container.decodeIfPresent(Bool.self, forKey: .wasInterrupted) ?? false
         desiredMode = try container.decodeIfPresent(
             AgentExecutionMode.self,
@@ -62,6 +68,22 @@ nonisolated struct ConnectOnionRemoteSessionState: Codable {
     }
 }
 
+extension ConnectOnionRemoteSessionState {
+    /// Cuts the saved session back to before your latest message (see `SessionRewind`). Every send
+    /// opens a new socket with this copy in CONNECT, so the next send redoes that turn. False when
+    /// there is no saved session or no message of yours in it.
+    mutating func rewindLatestTurn(prompt: String?, now: Date = Date()) -> Bool {
+        guard let data = sessionData,
+              case .object(let session)? = try? JSONDecoder().decode(JSONValue.self, from: data),
+              let rewound = SessionRewind.droppingLatestTurn(from: session, prompt: prompt, now: now),
+              let encoded = try? JSONEncoder().encode(JSONValue.object(rewound)) else {
+            return false
+        }
+        sessionData = encoded
+        return true
+    }
+}
+
 /// Persists per-conversation session state in `UserDefaults`. Without a
 /// conversation ID the store is deliberately ephemeral: loads start fresh
 /// and saves are dropped.
@@ -70,8 +92,13 @@ nonisolated final class ConnectOnionRemoteSessionStore {
     private let initialSessionID: String?
 
     init(conversationID: UUID?, initialSessionID: String?) {
-        key = conversationID.map { "connectonion.remote-session.\($0.uuidString)" }
+        key = conversationID.map(Self.key(for:))
         self.initialSessionID = initialSessionID
+    }
+
+    /// The UserDefaults key of one conversation's resume bookmark.
+    static func key(for conversationID: UUID) -> String {
+        "connectonion.remote-session.\(conversationID.uuidString)"
     }
 
     func load() -> ConnectOnionRemoteSessionState {
@@ -110,8 +137,7 @@ nonisolated func connectOnionPersistedRemoteSessionID(
     for conversationID: UUID,
     storage: UserDefaults = .standard
 ) -> String? {
-    let key = "connectonion.remote-session.\(conversationID.uuidString)"
-    guard let data = storage.data(forKey: key),
+    guard let data = storage.data(forKey: ConnectOnionRemoteSessionStore.key(for: conversationID)),
           let state = try? JSONDecoder().decode(
               ConnectOnionRemoteSessionState.self,
               from: data

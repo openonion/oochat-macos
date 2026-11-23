@@ -1,9 +1,39 @@
 import AppKit
 import SwiftUI
+import ConnectOnionKit
 import XCTest
 @testable import ConnectOnionMacClient
 
 extension ChatViewTests {
+    // A chat from a previous identity shows its transcript, with the label and the new-chat action
+    // where the composer was. The sidebar row carries the label too.
+    @MainActor
+    func testAPreviousIdentityChatRendersTheNewChatBarInPlaceOfTheComposer() throws {
+        let storage = try XCTUnwrap(UserDefaults(suiteName: "ChatViewTests.\(UUID().uuidString)"))
+        let appViewModel = AppViewModel(storage: storage, historyKeyStore: InMemoryPrivateKeyStore())
+        let configuration = GeneralAgentConfiguration(name: "Old Agent", connectionType: .byAddress)
+        let session = ChatSession(
+            agentConfigId: configuration.id,
+            identityAddress: "0x" + String(repeating: "cd", count: 32),
+            title: "Old"
+        )
+        appViewModel.configurations = [configuration]
+        appViewModel.sessions = [session]
+        appViewModel.messages = [ChatMessage(sessionId: session.id, role: .user, content: "old")]
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(isLinked: { false }, linkNotifications: NotificationCenter()),
+            appViewModel: appViewModel
+        )
+
+        render(viewModel)
+        renderView(SidebarView(appViewModel: appViewModel), width: 300)
+        renderView(PreviousIdentityComposerBar {}, width: 720, height: 80)
+        XCTAssertEqual(PreviousIdentity.label, "From a previous identity")
+        XCTAssertEqual(PreviousIdentity.startNewChat, "Start a new chat with this agent")
+    }
+
     @MainActor
     func testUnlinkedRunsIncludeOnlyUserVisibleTraces() async {
         let sessionID = UUID()
@@ -114,6 +144,40 @@ extension ChatViewTests {
                 )
             ]
         )
+    }
+
+    @MainActor
+    func testComposerStatusFollowsTheChatsOwnConnection() {
+        let viewModel = makeViewModel()
+        let service = viewModel.service
+
+        XCTAssertEqual(viewModel.connectionStatus(), .notConnected)
+
+        service.isConnected = true
+        XCTAssertEqual(viewModel.connectionStatus(connectingFor: 9), .connecting)
+        XCTAssertEqual(viewModel.connectionStatus(connectingFor: 10), .unreachable(.noAnswer))
+
+        service.isHostedAgentStatusLive = true
+        XCTAssertEqual(viewModel.connectionStatus(), .live)
+        service.isAgentRequestActive = true
+        XCTAssertEqual(viewModel.connectionStatus(), .working)
+
+        service.isAgentRequestActive = false
+        service.isHostedAgentStatusLive = false
+        service.connectionError = "The agent closed the connection."
+        XCTAssertEqual(viewModel.connectionStatus(), .unreachable(.noAnswer))
+        XCTAssertTrue(viewModel.connectionStatus().canRetry)
+    }
+
+    @MainActor
+    func testALiveChatMarksItsAgentOnline() {
+        let viewModel = makeViewModel()
+        viewModel.appViewModel.connectedConfigurationIds.remove(viewModel.configuration.id)
+        XCTAssertFalse(viewModel.isConfigurationConnected)
+
+        viewModel.service.isHostedAgentStatusLive = true
+
+        XCTAssertTrue(viewModel.isConfigurationConnected)
     }
 
     @MainActor

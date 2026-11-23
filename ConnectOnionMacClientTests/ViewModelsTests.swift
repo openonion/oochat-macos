@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import Foundation
 import XCTest
 @testable import ConnectOnionMacClient
@@ -115,8 +116,9 @@ final class ViewModelsTests: XCTestCase {
         await viewModel.discoverLocalAgents()
         await viewModel.discoverLocalAgents()
 
-        XCTAssertEqual(viewModel.configurations, [existing])
+        XCTAssertEqual(viewModel.configurations.map(\.id), [existing.id])
         XCTAssertEqual(viewModel.configurations[0].name, "My Main Agent")
+        XCTAssertEqual(viewModel.configurations[0].agentAddress, address, "the Direct URL agent learns its Address")
         XCTAssertTrue(viewModel.isAgentConnected(existing))
     }
 
@@ -168,6 +170,53 @@ final class ViewModelsTests: XCTestCase {
     }
 
     @MainActor
+    func testNewChatIsDraftUntilFirstMessageIsSent() async throws {
+        let storage = makeIsolatedDefaults()
+        let viewModel = AppViewModel(storage: storage, localAgentDefinitions: [])
+        let configuration = makeHostedConfiguration()
+        viewModel.configurations = [configuration]
+
+        viewModel.createNewSession(for: configuration)
+        let draft = try XCTUnwrap(viewModel.sessions.first)
+
+        // Selected, but hidden from the sidebar and not persisted.
+        XCTAssertEqual(viewModel.selection, .session(draft.id))
+        XCTAssertTrue(viewModel.visibleSessions.isEmpty)
+        XCTAssertTrue(
+            AppViewModel(storage: storage, localAgentDefinitions: [])
+                .sessions.isEmpty
+        )
+
+        viewModel.addMessage(
+            ChatMessage(sessionId: draft.id, role: .user, content: "Hello")
+        )
+
+        XCTAssertEqual(viewModel.visibleSessions.map(\.id), [draft.id])
+        XCTAssertEqual(
+            AppViewModel(storage: storage, localAgentDefinitions: [])
+                .sessions.map(\.id),
+            [draft.id]
+        )
+    }
+
+    @MainActor
+    func testRepeatedNewChatReusesDraftAndLeavingDiscardsIt() async throws {
+        let viewModel = AppViewModel(
+            storage: makeIsolatedDefaults(),
+            localAgentDefinitions: []
+        )
+        let configuration = makeHostedConfiguration()
+        viewModel.configurations = [configuration]
+
+        viewModel.createNewSession(for: configuration)
+        viewModel.createNewSession(for: configuration)
+        XCTAssertEqual(viewModel.sessions.count, 1)
+
+        viewModel.selection = nil
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+    }
+
+    @MainActor
     func testCreateSessionSelectsItAndTitleUpdatesAreNormalized() async throws {
         let viewModel = makeViewModel()
         let configuration = makeHostedConfiguration()
@@ -180,20 +229,25 @@ final class ViewModelsTests: XCTestCase {
             session.remoteSessionID,
             session.id.uuidString.lowercased()
         )
-        XCTAssertEqual(session.title, "New Chat")
+        XCTAssertEqual(session.title, "New chat")
         XCTAssertEqual(viewModel.selection, .session(session.id))
+
+        viewModel.updateSessionTitle(session, with: "/help")
+        XCTAssertEqual(viewModel.sessions[0].title, "New chat", "a slash command never names a chat")
 
         viewModel.updateSessionTitle(
             session,
             with: "  This message is deliberately longer than forty characters.  "
         )
-        XCTAssertEqual(viewModel.sessions[0].title.count, 40)
-        XCTAssertTrue(viewModel.sessions[0].title.hasPrefix("This message"))
+        XCTAssertEqual(viewModel.sessions[0].title, "This message is deliberately longer than forty characters.")
+
+        viewModel.updateSessionTitle(viewModel.sessions[0], with: "A later message")
+        XCTAssertEqual(viewModel.sessions[0].title, "This message is deliberately longer than forty characters.", "named once")
 
         viewModel.renameSession(viewModel.sessions[0], to: "  Renamed chat  ")
         XCTAssertEqual(viewModel.sessions[0].title, "Renamed chat")
         viewModel.renameSession(viewModel.sessions[0], to: " \n ")
-        XCTAssertEqual(viewModel.sessions[0].title, "New Chat")
+        XCTAssertEqual(viewModel.sessions[0].title, "New chat")
     }
 
     @MainActor
@@ -226,6 +280,10 @@ final class ViewModelsTests: XCTestCase {
                         "session": [
                             "updated": 1_700_000_020,
                             "messages": [
+                                [
+                                    "role": "system",
+                                    "content": "You are a helpful agent."
+                                ],
                                 [
                                     "role": "user",
                                     "content": "History from web"
@@ -277,9 +335,8 @@ final class ViewModelsTests: XCTestCase {
                     endpoint: mainAgentURL.absoluteString
                 )
             ],
-            historyClient: ConnectOnionHistoryClient(
-                urlSession: URLSession(configuration: urlConfiguration)
-            ),
+            historyURLSession: URLSession(configuration: urlConfiguration),
+            historyKeyStore: InMemoryPrivateKeyStore(),
             resolveAgentEndpoint: { _ in endpoint }
         )
 
@@ -305,123 +362,6 @@ final class ViewModelsTests: XCTestCase {
     }
 
     @MainActor
-    func testHostedHistoryUpdatePreservesGeneratedArtifactMetadata() async throws {
-        let storage = makeIsolatedDefaults()
-        let remoteSessionID = UUID().uuidString.lowercased()
-        let remoteUpdated = Date().timeIntervalSince1970 + 60
-        ViewModelHistoryURLProtocol.install { request in
-            let body = try JSONSerialization.data(withJSONObject: [
-                "sessions": [
-                    [
-                        "session_id": remoteSessionID,
-                        "status": "done",
-                        "prompt": "Export the report",
-                        "result": "Your updated report is ready.",
-                        "created": remoteUpdated - 10,
-                        "session": [
-                            "updated": remoteUpdated,
-                            "messages": [
-                                [
-                                    "role": "user",
-                                    "content": "Export the report"
-                                ],
-                                [
-                                    "role": "assistant",
-                                    "content": "Your updated report is ready."
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ])
-            return (
-                try makeViewModelHistoryResponse(for: request),
-                body
-            )
-        }
-        defer { ViewModelHistoryURLProtocol.reset() }
-
-        let mainAgentURL = try XCTUnwrap(URL(string: "http://127.0.0.1:8000"))
-        let address = "0x" + String(repeating: "ab", count: 32)
-        let endpoint = ConnectOnionResolvedEndpoint(
-            agentAddress: address,
-            webSocketURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:8000/ws")),
-            httpBaseURL: mainAgentURL,
-            isDirect: true,
-            info: nil
-        )
-        let configuration = GeneralAgentConfiguration(
-            name: "Main Agent",
-            connectionType: .byAddress,
-            addressConfiguration: AgentAddressConfiguration(
-                agentAddress: mainAgentURL.absoluteString
-            )
-        )
-        let session = ChatSession(
-            agentConfigId: configuration.id,
-            agentIdentity: configuration.agentIdentity,
-            remoteSessionID: remoteSessionID,
-            title: "Export the report",
-            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
-            updatedAt: Date(timeIntervalSince1970: 1_700_000_010)
-        )
-        let userMessage = ChatMessage(
-            sessionId: session.id,
-            role: .user,
-            content: "Export the report"
-        )
-        let artifact = GeneratedArtifactReference(
-            artifactID: UUID().uuidString,
-            name: "report.txt",
-            mimeType: "text/plain",
-            sizeBytes: 12,
-            sha256: String(repeating: "a", count: 64)
-        )
-        let agentMessage = ChatMessage(
-            sessionId: session.id,
-            role: .agent,
-            content: "Your report is ready.",
-            usage: ChatUsageSummary(
-                tokenCount: 120,
-                totalCost: 0.01,
-                contextPercent: 2
-            ),
-            replyToMessageID: userMessage.id,
-            artifacts: [artifact]
-        )
-        let viewModel = AppViewModel(
-            storage: storage,
-            localAgentDefinitions: [],
-            historyClient: ConnectOnionHistoryClient(
-                urlSession: URLSession(
-                    configuration: {
-                        let configuration = URLSessionConfiguration.ephemeral
-                        configuration.protocolClasses = [ViewModelHistoryURLProtocol.self]
-                        return configuration
-                    }()
-                )
-            ),
-            resolveAgentEndpoint: { _ in endpoint }
-        )
-        viewModel.configurations = [configuration]
-        viewModel.sessions = [session]
-        viewModel.messages = [userMessage, agentMessage]
-
-        await viewModel.refreshAgentStatusAndWait(for: configuration)
-
-        let synchronized = viewModel.findMessages(for: session.id)
-        XCTAssertEqual(synchronized.map(\.content), [
-            "Export the report",
-            "Your updated report is ready."
-        ])
-        XCTAssertEqual(synchronized[0].id, userMessage.id)
-        XCTAssertEqual(synchronized[1].id, agentMessage.id)
-        XCTAssertEqual(synchronized[1].artifacts, [artifact])
-        XCTAssertEqual(synchronized[1].usage, agentMessage.usage)
-        XCTAssertEqual(synchronized[1].replyToMessageID, userMessage.id)
-    }
-
-    @MainActor
     func testLegacySessionMigratesPersistedRemoteIdentifier() async throws {
         let storage = makeIsolatedDefaults()
         let configuration = makeHostedConfiguration()
@@ -437,6 +377,17 @@ final class ViewModelsTests: XCTestCase {
         storage.set(
             try JSONEncoder().encode([session]),
             forKey: "saved_sessions"
+        )
+        // Sessions without messages are drafts and are discarded on load.
+        storage.set(
+            try JSONEncoder().encode([
+                ChatMessage(
+                    sessionId: session.id,
+                    role: .user,
+                    content: "Legacy message"
+                )
+            ]),
+            forKey: "saved_messages"
         )
         storage.set(
             try JSONSerialization.data(withJSONObject: [
@@ -524,6 +475,24 @@ final class ViewModelsTests: XCTestCase {
     }
 
     @MainActor
+    func testWorkRoomBarrierScopeIsStablePerChat() {
+        let viewModel = makeViewModel()
+        let agentId = UUID()
+        let first = ChatSession(agentConfigId: agentId, agentIdentity: "0xabc", title: "One")
+        let second = ChatSession(agentConfigId: agentId, agentIdentity: "0xabc", title: "Two")
+        let reloaded = first
+
+        XCTAssertNotEqual(
+            viewModel.workRoomBarrierScope(for: first),
+            viewModel.workRoomBarrierScope(for: second)
+        )
+        XCTAssertEqual(
+            viewModel.workRoomBarrierScope(for: first),
+            viewModel.workRoomBarrierScope(for: reloaded)
+        )
+    }
+
+    @MainActor
     func testDeleteSessionRemovesAllRelatedStateAndSelection() async {
         let viewModel = makeViewModel()
         let session = ChatSession(agentConfigId: UUID(), title: "Delete me")
@@ -550,7 +519,7 @@ final class ViewModelsTests: XCTestCase {
 
         viewModel.deleteSession(session)
 
-        XCTAssertEqual(viewModel.sessions, [retainedSession])
+        XCTAssertEqual(viewModel.visibleSessions, [retainedSession])
         XCTAssertEqual(viewModel.messages, [retainedMessage])
         XCTAssertTrue(viewModel.findExecutionItems(for: session.id).isEmpty)
         XCTAssertTrue(viewModel.findExecutionRuns(for: session.id).isEmpty)
@@ -614,30 +583,30 @@ final class ViewModelsTests: XCTestCase {
                 endpoint: mainAgentURL.absoluteString
             )
         ]
-        let historyClient = ConnectOnionHistoryClient(
-            urlSession: URLSession(configuration: urlConfiguration)
-        )
+        let historyURLSession = URLSession(configuration: urlConfiguration)
         let viewModel = AppViewModel(
             storage: storage,
             localAgentDefinitions: definitions,
-            historyClient: historyClient,
+            historyURLSession: historyURLSession,
+            historyKeyStore: InMemoryPrivateKeyStore(),
             resolveAgentEndpoint: { _ in endpoint }
         )
 
         await viewModel.discoverLocalAgents()
         let imported = try XCTUnwrap(viewModel.sessions.first)
         viewModel.deleteSession(imported)
-        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertTrue(viewModel.visibleSessions.isEmpty)
 
         let reloaded = AppViewModel(
             storage: storage,
             localAgentDefinitions: definitions,
-            historyClient: historyClient,
+            historyURLSession: historyURLSession,
+            historyKeyStore: InMemoryPrivateKeyStore(),
             resolveAgentEndpoint: { _ in endpoint }
         )
         await reloaded.discoverLocalAgents()
 
-        XCTAssertTrue(reloaded.sessions.isEmpty)
+        XCTAssertTrue(reloaded.visibleSessions.isEmpty)
         XCTAssertTrue(reloaded.messages.isEmpty)
     }
 

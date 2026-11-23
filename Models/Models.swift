@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// How a saved configuration reaches its agent. Only `byAddress` is live; the
@@ -18,12 +19,38 @@ nonisolated struct GeneralAgentConfiguration: Identifiable, Codable, Hashable {
     var addressConfiguration: AgentAddressConfiguration?
     var avatarTextColorHex: String?
     var avatarBackgroundColorHex: String?
+    /// The 0x Address a Direct URL agent reported when last reached. nil until then, and for a 0x agent;
+    /// older data decodes as nil.
+    var resolvedAddress: String?
+    /// Set once the host's profile says this agent is a Claude Station, so its row can show it before the next connect.
+    var isClaudeStation = false
 
     /// Stable identity: normalized 0x address or Direct URL. Used to keep
     /// sessions attached to the same agent even if its local UUID changes.
     var agentIdentity: String? {
         guard let raw = addressConfiguration?.agentAddress else { return nil }
         return ConnectOnionAgentTarget.normalized(raw)
+    }
+
+    /// The lower-cased 0x Address this agent answers as, where the app knows it. Agents match by it:
+    /// a Direct URL agent and a 0x agent with the same Address are one agent.
+    var agentAddress: String? {
+        addressConfiguration.flatMap { ConnectOnionAddress.normalized($0.agentAddress) } ?? resolvedAddress
+    }
+}
+
+extension GeneralAgentConfiguration {
+    /// Configurations saved before `isClaudeStation` existed have no such key.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        connectionType = try container.decode(AgentConnectionType.self, forKey: .connectionType)
+        addressConfiguration = try container.decodeIfPresent(AgentAddressConfiguration.self, forKey: .addressConfiguration)
+        avatarTextColorHex = try container.decodeIfPresent(String.self, forKey: .avatarTextColorHex)
+        avatarBackgroundColorHex = try container.decodeIfPresent(String.self, forKey: .avatarBackgroundColorHex)
+        resolvedAddress = try container.decodeIfPresent(String.self, forKey: .resolvedAddress)
+        isClaudeStation = try container.decodeIfPresent(Bool.self, forKey: .isClaudeStation) ?? false
     }
 }
 
@@ -45,9 +72,29 @@ nonisolated struct ChatSession: Identifiable, Codable, Hashable {
     /// Stable ConnectOnion host session identifier shared by native and web
     /// clients. Older locally-only conversations decode this as `nil`.
     var remoteSessionID: String?
+    /// The Address this chat was made under, stamped when a Device Link replaces the Identity.
+    /// nil means the current Address; older data decodes as nil.
+    var identityAddress: String?
     var title: String
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
+    /// The host's `updated` value from the last History Restore that returned this session. nil for a chat
+    /// the host has never returned; older data decodes as nil.
+    var hostUpdatedAt: Date?
+    /// Set when the chat was deleted: the row is a Tombstone, emptied and hidden, and this is the `updated`
+    /// value History Restore must see exceeded before it brings the session back. Older data decodes as nil.
+    var tombstoneUpdatedAt: Date?
+
+    /// A deleted chat kept only so History Restore can skip its session.
+    var isTombstone: Bool { tombstoneUpdatedAt != nil }
+
+    static let defaultTitle = "New chat"
+    /// Chats saved before the copy change say "New Chat".
+    static let legacyDefaultTitles: Set<String> = ["New Chat"]
+
+    var isUntitled: Bool {
+        title == Self.defaultTitle || Self.legacyDefaultTitles.contains(title)
+    }
 }
 
 /// Who produced a `ChatMessage`.
@@ -176,6 +223,29 @@ nonisolated enum ExecutionStatus: String, Codable, Hashable, Sendable {
     case running
     case done
     case error
+    /// A tool still running when its run ended: Stop, a lost connection, or a stopped batch.
+    case interrupted
+    /// A tool you chose Skip for on its approval, so it never ran.
+    case skipped
+
+    /// A status this build doesn't know, saved by a newer one, reads as done, so the rest of the
+    /// saved traces still load instead of the whole list failing to decode.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ExecutionStatus(rawValue: raw) ?? .done
+    }
+
+    /// What a tool row shows, in the words both apps share. Awaiting approval isn't stored:
+    /// it's a running tool whose approval card is open (ChatViewModel.toolAwaitingApprovalID).
+    var rowState: ToolRowState {
+        switch self {
+        case .running: return .running
+        case .done: return .completed
+        case .error: return .failed
+        case .interrupted: return .interrupted
+        case .skipped: return .skipped
+        }
+    }
 }
 
 /// The host's opening acknowledgement, shown before any tool runs.
@@ -291,58 +361,6 @@ nonisolated enum EvalStatus: String, Codable, Hashable, Sendable {
     case done
 }
 
-/// A schema-free JSON value, used for tool arguments whose shape depends on
-/// the tool. Decoding probes concrete types in order and fails rather than
-/// silently dropping an unsupported value.
-nonisolated enum JSONValue: Codable, Hashable, Sendable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-        } else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unsupported JSON value"
-            )
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
-}
-
 extension ExecutionItem {
     func mergingDisplayFields(from previous: ExecutionItem) -> ExecutionItem {
         switch (self, previous) {
@@ -364,6 +382,10 @@ extension ExecutionItem {
             }
             current.result = current.result ?? existing.result
             current.timingMS = current.timingMS ?? existing.timingMS
+            // A skipped tool comes back as an error ("User rejected…"); it stays Skipped.
+            if existing.status == .skipped {
+                current.status = .skipped
+            }
             return .toolCall(current)
 
         case (.approval, .approval):
@@ -577,6 +599,8 @@ extension ToolCallExecutionItem {
             base = category == .shell ? "EXIT CODE \(shellExitCode ?? 1)" : "ERROR"
         case .done:
             base = category == .shell ? "EXIT CODE \(shellExitCode ?? 0)" : "DONE"
+        case .interrupted, .skipped:
+            base = status.rowState.label.uppercased()
         }
         if let timing, !timing.isEmpty {
             return "\(base) (\(timing))"
@@ -598,6 +622,17 @@ extension ToolCallExecutionItem {
             }
         }
         return nil
+    }
+    /// Finished and, for shell tools, exited 0. `statusLabel` treats a missing
+    /// "Exit code:" line as 0, so this matches what the row already displays.
+    var isCleanlyFinished: Bool {
+        status == .done && (shellExitCode ?? 0) == 0
+    }
+
+    /// Failed: an error status, or done with a non-zero exit code. Skipped and Interrupted are
+    /// your own choices, not failures, so they don't count (their grey mark says what happened).
+    var needsAttention: Bool {
+        status == .error || (status == .done && !isCleanlyFinished)
     }
 
     private var fileArgument: String? {
