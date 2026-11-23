@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Combine
 import CryptoKit
 import XCTest
@@ -236,7 +237,7 @@ extension ConnectOnionServiceTests {
     }
 
     func testJSONValueRoundTripsNestedProtocolArguments() throws {
-        let value = ConnectOnionJSONValue(
+        let value = JSONValue(
             any: [
                 "path": "README.md",
                 "overwrite": true,
@@ -245,7 +246,7 @@ extension ConnectOnionServiceTests {
         )
 
         let encoded = try JSONEncoder().encode(value)
-        let decoded = try JSONDecoder().decode(ConnectOnionJSONValue.self, from: encoded)
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: encoded)
 
         XCTAssertEqual(decoded, value)
         XCTAssertTrue(value.displayText.contains("README.md"))
