@@ -55,13 +55,27 @@ final class BalanceViewTests: XCTestCase {
     }
 
     @MainActor
+    private func makeAppViewModel() -> AppViewModel {
+        let suiteName = "BalanceViewTests.\(UUID().uuidString)"
+        guard let storage = UserDefaults(suiteName: suiteName) else {
+            preconditionFailure("Failed to create isolated UserDefaults suite")
+        }
+        storage.removePersistentDomain(forName: suiteName)
+        return AppViewModel(storage: storage, localAgentDefinitions: [])
+    }
+
+    @MainActor
     private func render(
         _ viewModel: BalanceViewModel,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
         let hostingView = NSHostingView(
-            rootView: BalanceAndAddressView(viewModel: viewModel)
+            rootView: BalanceView(
+                appViewModel: makeAppViewModel(),
+                viewModel: viewModel,
+                onBack: {}
+            )
                 .frame(width: 900, height: 360)
         )
         hostingView.frame = NSRect(x: 0, y: 0, width: 900, height: 360)

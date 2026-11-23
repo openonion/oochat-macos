@@ -328,11 +328,11 @@ extension ViewModelsTests {
         }
 
         XCTAssertEqual(
-            BalanceAndAddressView.formattedBalance(fractionalBalance),
+            BalanceView.formattedBalance(fractionalBalance),
             "4.23"
         )
         XCTAssertEqual(
-            BalanceAndAddressView.formattedBalance(groupedBalance),
+            BalanceView.formattedBalance(groupedBalance),
             "1,234.57"
         )
     }
@@ -481,6 +481,74 @@ extension ViewModelsTests {
         XCTAssertTrue(viewModel.sessions.isEmpty)
         XCTAssertTrue(viewModel.messages.isEmpty)
         XCTAssertTrue(viewModel.orphanedSessions.isEmpty)
+    }
+
+    @MainActor
+    func testDraftSurvivesSwitchingChatsAndRelaunching() {
+        let storage = makeIsolatedDefaults()
+        let configuration = makeHostedConfiguration()
+        let session = ChatSession(agentConfigId: configuration.id, title: "Drafting")
+        let original = AppViewModel(storage: storage, localAgentDefinitions: [])
+        original.configurations = [configuration]
+        original.sessions = [session]
+        original.messages = [ChatMessage(sessionId: session.id, role: .user, content: "Hi")]
+        original.setDraft("half-written thought", for: session.id)
+
+        let reloaded = AppViewModel(storage: storage, localAgentDefinitions: [])
+        XCTAssertEqual(reloaded.draft(for: session.id), "half-written thought")
+
+        // Opening the chat again (a fresh ChatViewModel, as on every switch) starts from the draft.
+        let chat = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: reloaded
+        )
+        XCTAssertEqual(chat.inputText, "half-written thought")
+    }
+
+    @MainActor
+    func testDeletingAChatForgetsItsDraft() {
+        let storage = makeIsolatedDefaults()
+        let configuration = makeHostedConfiguration()
+        let session = ChatSession(agentConfigId: configuration.id, title: "Drafting")
+        let viewModel = AppViewModel(storage: storage, localAgentDefinitions: [])
+        viewModel.configurations = [configuration]
+        viewModel.sessions = [session]
+        viewModel.messages = [ChatMessage(sessionId: session.id, role: .user, content: "Hi")]
+        viewModel.setDraft("never sent", for: session.id)
+
+        viewModel.deleteSession(session)
+
+        XCTAssertEqual(viewModel.draft(for: session.id), "")
+        let reloaded = AppViewModel(storage: storage, localAgentDefinitions: [])
+        XCTAssertEqual(reloaded.draft(for: session.id), "")
+    }
+
+    @MainActor
+    func testRelaunchReopensTheLastSelectedChat() {
+        let storage = makeIsolatedDefaults()
+        let configuration = makeHostedConfiguration()
+        let session = ChatSession(agentConfigId: configuration.id, title: "Last open")
+        let original = AppViewModel(storage: storage, localAgentDefinitions: [])
+        original.configurations = [configuration]
+        original.sessions = [session]
+        original.messages = [ChatMessage(sessionId: session.id, role: .user, content: "Hi")]
+        original.selection = .session(session.id)
+
+        let reloaded = AppViewModel(storage: storage, localAgentDefinitions: [])
+
+        XCTAssertEqual(reloaded.selection, .session(session.id))
+    }
+
+    @MainActor
+    func testRelaunchIgnoresAChatThatNoLongerExists() {
+        let storage = makeIsolatedDefaults()
+        storage.set(UUID().uuidString, forKey: "last_selected_session")
+
+        let reloaded = AppViewModel(storage: storage, localAgentDefinitions: [])
+
+        XCTAssertNil(reloaded.selection)
     }
 
     @MainActor

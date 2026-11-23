@@ -22,7 +22,12 @@ class AppViewModel: ObservableObject {
     }
 
     @Published var messages: [ChatMessage] = [] {
-        didSet { saveMessages() }
+        didSet {
+            saveMessages()
+            // A session is only persisted once it has messages, so the
+            // session list must be re-evaluated whenever messages change.
+            saveSessions()
+        }
     }
     @Published var executionItemsBySession: [UUID: [ExecutionItem]] = [:] {
         didSet { saveExecutionItems() }
@@ -31,7 +36,12 @@ class AppViewModel: ObservableObject {
         didSet { saveExecutionRuns() }
     }
 
-    @Published var selection: NavigationItem?
+    @Published var selection: NavigationItem? {
+        didSet {
+            pruneEmptySessions()
+            rememberSelection()
+        }
+    }
     /// Bumped on every explicit history selection so views can re-focus the
     /// session even when the selection value itself did not change.
     @Published private(set) var sessionSelectionRevision = 0
@@ -40,12 +50,20 @@ class AppViewModel: ObservableObject {
     @Published private(set) var orphanedSessions: [ChatSession] = []
 
     private let configKey = "saved_configurations"
+    private let lastSelectedSessionKey = "last_selected_session"
     private let sessionKey = "saved_sessions"
     private let messageKey = "saved_messages"
     private let executionItemsKey = "saved_execution_items"
     private let executionRunsKey = "saved_execution_runs"
     private let deletedRemoteSessionIDsKey = "deleted_remote_session_ids"
+    private let draftsKey = "composer_drafts"
+    /// Unsent composer text per chat, so switching chats or relaunching keeps it.
+    private var drafts: [UUID: String] = [:]
     private let storage: UserDefaults
+    /// Suppresses session persistence while stored state is being restored,
+    /// because messages load after sessions and would otherwise make every
+    /// restored session look empty.
+    private var isRestoringData = false
     let generatedArtifactStore: GeneratedArtifactStore
     private let resolveAgentEndpoint: (String) async throws -> ConnectOnionResolvedEndpoint
     private let historyClient: ConnectOnionHistoryClient
@@ -73,11 +91,56 @@ class AppViewModel: ObservableObject {
         self.historyClient = historyClient
         self.resolveAgentEndpoint = resolveAgentEndpoint
         loadData()
+        loadDrafts()
+        restoreLastSelection()
     }
 
-    /// Seeds the remote session ID from the local UUID so the transcript the
-    /// host stores for this chat can be matched back during history import.
+    func draft(for sessionID: UUID) -> String {
+        drafts[sessionID] ?? ""
+    }
+
+    func setDraft(_ text: String, for sessionID: UUID) {
+        guard drafts[sessionID, default: ""] != text else { return }
+        drafts[sessionID] = text.isEmpty ? nil : text
+        saveDrafts()
+    }
+
+    private func forgetDrafts(for sessionIDs: some Sequence<UUID>) {
+        for id in sessionIDs {
+            drafts[id] = nil
+        }
+        saveDrafts()
+    }
+
+    private func saveDrafts() {
+        let stored = Dictionary(uniqueKeysWithValues: drafts.map { ($0.key.uuidString, $0.value) })
+        storage.set(stored, forKey: draftsKey)
+    }
+
+    /// Keeps only drafts whose chat still exists.
+    private func loadDrafts() {
+        let stored = storage.dictionary(forKey: draftsKey) as? [String: String] ?? [:]
+        let sessionIDs = Set(sessions.map(\.id))
+        drafts = stored.reduce(into: [:]) { result, entry in
+            if let id = UUID(uuidString: entry.key), sessionIDs.contains(id) {
+                result[id] = entry.value
+            }
+        }
+    }
+
+    /// Starts a draft chat. The draft lives only in memory and stays out of the
+    /// sidebar and storage until its first message is sent. Seeds the remote
+    /// session ID from the local UUID so the transcript the host stores for
+    /// this chat can be matched back during history import.
     func createNewSession(for config: GeneralAgentConfiguration) {
+        // Reuse the selected draft instead of stacking up empty chats.
+        if case .session(let selectedID) = selection,
+           let existing = sessions.first(where: { $0.id == selectedID }),
+           !hasMessages(existing),
+           existing.agentConfigId == config.id {
+            return
+        }
+
         let sessionID = UUID()
         let newSession = ChatSession(
             id: sessionID,
@@ -88,6 +151,56 @@ class AppViewModel: ObservableObject {
         )
         sessions.append(newSession)
         selection = .session(newSession.id)
+    }
+
+    /// Whether the session has any messages. Sessions without messages are
+    /// drafts: never shown in the sidebar and never persisted.
+    func hasMessages(_ session: ChatSession) -> Bool {
+        messages.contains { $0.sessionId == session.id }
+    }
+
+    /// Sessions that should appear in the sidebar.
+    var visibleSessions: [ChatSession] {
+        let sessionIDsWithMessages = Set(messages.map { $0.sessionId })
+        return sessions.filter { sessionIDsWithMessages.contains($0.id) }
+    }
+
+    /// Remembers the open chat so a relaunch can reopen it. A draft's ID may be saved too,
+    /// but drafts aren't persisted, so `restoreLastSelection` skips it.
+    private func rememberSelection() {
+        guard !isRestoringData, case .session(let id) = selection else { return }
+        storage.set(id.uuidString, forKey: lastSelectedSessionKey)
+    }
+
+    /// Reopens the chat that was open at quit, if it and its agent are still here.
+    /// Otherwise the selection stays empty and the app shows Choose an agent.
+    private func restoreLastSelection() {
+        guard let raw = storage.string(forKey: lastSelectedSessionKey),
+              let id = UUID(uuidString: raw),
+              let session = sessions.first(where: { $0.id == id }),
+              configuration(for: session) != nil else {
+            return
+        }
+        selection = .session(id)
+    }
+
+    /// Drops draft sessions the user has navigated away from.
+    private func pruneEmptySessions() {
+        guard !isRestoringData else { return }
+        var keptID: UUID?
+        if case .session(let id) = selection { keptID = id }
+        let sessionIDsWithMessages = Set(messages.map { $0.sessionId })
+        let abandoned = sessions.filter {
+            !sessionIDsWithMessages.contains($0.id) && $0.id != keptID
+        }
+        guard !abandoned.isEmpty else { return }
+        let abandonedIDs = Set(abandoned.map { $0.id })
+        sessions.removeAll { abandonedIDs.contains($0.id) }
+        for id in abandonedIDs {
+            executionItemsBySession.removeValue(forKey: id)
+            executionRunsBySession.removeValue(forKey: id)
+        }
+        forgetDrafts(for: abandonedIDs)
     }
 
     func selectHistoricalSession(_ sessionId: UUID) {
@@ -114,6 +227,7 @@ class AppViewModel: ObservableObject {
             executionItemsBySession.removeValue(forKey: sessionId)
             executionRunsBySession.removeValue(forKey: sessionId)
         }
+        forgetDrafts(for: sessionIds)
         generatedArtifactStore.removeArtifacts(artifactReferences)
 
         if case .session(let selectedSessionId) = selection,
@@ -133,6 +247,7 @@ class AppViewModel: ObservableObject {
             executionItemsBySession.removeValue(forKey: sessionId)
             executionRunsBySession.removeValue(forKey: sessionId)
         }
+        forgetDrafts(for: orphanIDs)
         orphanedSessions = []
     }
 
@@ -149,6 +264,7 @@ class AppViewModel: ObservableObject {
         messages.removeAll { $0.sessionId == session.id }
         executionItemsBySession.removeValue(forKey: session.id)
         executionRunsBySession.removeValue(forKey: session.id)
+        forgetDrafts(for: [session.id])
         generatedArtifactStore.removeArtifacts(artifactReferences)
 
         if selection == .session(session.id) {
@@ -469,7 +585,8 @@ class AppViewModel: ObservableObject {
     }
 
     private func saveSessions() {
-        if let data = try? JSONEncoder().encode(sessions) {
+        guard !isRestoringData else { return }
+        if let data = try? JSONEncoder().encode(visibleSessions) {
             storage.set(data, forKey: sessionKey)
         }
     }
@@ -478,6 +595,14 @@ class AppViewModel: ObservableObject {
     /// non-address configurations are dropped, missing remote session IDs are
     /// backfilled, and obsolete connection notices are filtered out.
     private func loadData() {
+        isRestoringData = true
+        defer {
+            isRestoringData = false
+            // Drops draft sessions persisted by older versions.
+            sessions.removeAll { !hasMessages($0) }
+            saveSessions()
+        }
+
         if let deletedSessionData = storage.data(
             forKey: deletedRemoteSessionIDsKey
         ), let decodedIDs = try? JSONDecoder().decode(
@@ -775,7 +900,6 @@ class AppViewModel: ObservableObject {
                 didChangeMessages = true
             }
         }
-
         if didChangeSessions {
             sessions = updatedSessions.sorted { $0.updatedAt > $1.updatedAt }
         }
