@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import Foundation
 import SwiftUI
 
@@ -60,12 +61,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ConnectOnionMacClientApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    init() {
+        OOFonts.register()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
         }
         .commands {
+            // ⌘N starts a chat (the sidebar's New chat), not a second window.
+            CommandGroup(replacing: .newItem) {}
             DockerRuntimeCommands(dockerRuntime: .shared)
         }
     }

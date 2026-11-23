@@ -40,6 +40,7 @@ from connectonion.useful_plugins import (
     tool_approval,
     ulw,
 )
+from connectonion.useful_plugins.re_act import _format_conversation
 from connectonion.useful_plugins.ulw import handle_ulw_mode_change
 from connectonion.useful_tools import ask_user
 from connectonion.useful_tools import edit as connectonion_edit
@@ -538,9 +539,21 @@ def acknowledge_request(agent) -> None:
     if not user_prompt or _is_trivial_input(user_prompt):
         return
 
+    # Earlier turns let a short follow-up ("yes", "do it") be acknowledged in
+    # context. Plain chat text only: the system prompt, tool-call messages
+    # (content None) and earlier acknowledgments add nothing here.
+    history = [
+        message
+        for message in agent.current_session.get("messages", [])
+        if message.get("role") in ("user", "assistant")
+        and isinstance(message.get("content"), str)
+        and not message.get("internal")
+    ]
+
     try:
         ack = str(
             llm_do(
+                f"Conversation so far:\n{_format_conversation(history)}\n\n"
                 f"Current user input: {user_prompt}\n\n"
                 "Acknowledge this request in 1-2 sentences.",
                 model=acknowledge_model(),

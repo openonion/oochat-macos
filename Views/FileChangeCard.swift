@@ -1,17 +1,50 @@
 import SwiftUI
 import AppKit
+import ConnectOnionKit
 
 struct FileChangeCard: View {
     let change: FileChangeSummary
-    let status: ExecutionStatus
+    /// The row state, Awaiting approval included, as the plain tool row works it out.
+    let state: ToolRowState
+    var toolName: String?
     let timingMS: Double?
 
-    @State private var isExpanded = true
+    @State private var isExpanded: Bool
+    @State private var hasToggledByHand = false
     @State private var copiedLabel: String?
+
+    init(change: FileChangeSummary, state: ToolRowState, toolName: String? = nil, timingMS: Double?) {
+        self.change = change
+        self.state = state
+        self.toolName = toolName
+        self.timingMS = timingMS
+        _isExpanded = State(initialValue: Self.startsOpen(for: state))
+    }
+
+    /// A diff stays open while its call runs, waits on you or has failed, so you can read it.
+    /// It starts folded once done, skipped or stopped: a skipped patch was never applied.
+    static func startsOpen(for state: ToolRowState) -> Bool {
+        switch state {
+        case .running, .awaitingApproval, .failed:
+            return true
+        case .completed, .skipped, .interrupted:
+            return false
+        }
+    }
+
+    /// Said above the diff once the change never happened.
+    private var settledNote: String? {
+        switch state {
+        case .skipped: return "You skipped this tool, so this change wasn't made."
+        case .interrupted: return "Stopped before it finished, so this change may not have been made."
+        default: return nil
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
+                hasToggledByHand = true
                 withAnimation(.easeInOut(duration: 0.15)) {
                     isExpanded.toggle()
                 }
@@ -38,7 +71,7 @@ struct FileChangeCard: View {
                         Text("−\(change.deletions)")
                             .foregroundStyle(AppPalette.error)
                     }
-                    if let timingMS {
+                    if let timingMS, timingMS >= 50 {
                         Text(formatDuration(timingMS))
                             .foregroundStyle(.secondary)
                     }
@@ -55,6 +88,13 @@ struct FileChangeCard: View {
 
             if isExpanded {
                 Divider()
+                if let settledNote {
+                    Text(settledNote)
+                        .font(.system(size: AppFontSize.footnote))
+                        .foregroundStyle(OOColor.inkSecondary)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                }
                 if let diff = change.diff, !diff.isEmpty {
                     ScrollView([.horizontal, .vertical]) {
                         VStack(alignment: .leading, spacing: 0) {
@@ -90,25 +130,24 @@ struct FileChangeCard: View {
                 .padding(.vertical, 8)
             }
         }
-        .background(AppPalette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(OOColor.paper)
+        .clipShape(RoundedRectangle(cornerRadius: OORadius.card, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(AppPalette.divider, lineWidth: 1)
+            RoundedRectangle(cornerRadius: OORadius.card, style: .continuous)
+                .stroke(OOColor.hairline, lineWidth: 1)
         }
         .frame(maxWidth: 920, alignment: .leading)
+        .onChange(of: state) { _, newState in
+            if !Self.startsOpen(for: newState), !hasToggledByHand {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isExpanded = false
+                }
+            }
+        }
     }
 
-    @ViewBuilder
     private var statusIcon: some View {
-        if status == .running {
-            ProgressView()
-                .controlSize(.small)
-        } else {
-            Image(systemName: status == .error ? "xmark" : "checkmark")
-                .font(.system(size: AppFontSize.body, weight: .semibold))
-                .foregroundStyle(status == .error ? AppPalette.error : AppPalette.success)
-        }
+        ToolStatusMark(state: state, toolName: toolName)
     }
 
     private var displayPath: String {
@@ -146,20 +185,23 @@ struct FileChangeCard: View {
     }
 
     private func copyButton(label: String, value: String) -> some View {
-        Button(copiedLabel == label ? "Copied" : label) {
+        Button {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(value, forType: .string)
             copiedLabel = label
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                if copiedLabel == label {
-                    copiedLabel = nil
-                }
+                if copiedLabel == label { copiedLabel = nil }
             }
+        } label: {
+            Text(copiedLabel == label ? "Copied" : label)
+                .font(.caption)
+                .foregroundStyle(copiedLabel == label ? AppPalette.success : Color.secondary)
+                .padding(.horizontal, 4)
+                .frame(minHeight: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .font(.caption)
-        .foregroundStyle(copiedLabel == label ? AppPalette.success : Color.secondary)
     }
 
     private func formatDuration(_ milliseconds: Double) -> String {

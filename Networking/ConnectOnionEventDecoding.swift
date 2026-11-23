@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// Stateless decoding of raw protocol dictionaries into native model values.
@@ -174,24 +175,7 @@ extension ConnectOnionRemoteAgentClient {
         guard let object = value as? [String: Any] else {
             return [:]
         }
-        return object.mapValues(Self.jsonValue)
-    }
-
-    nonisolated private static func jsonValue(from value: Any) -> JSONValue {
-        switch value {
-        case let value as String:
-            return .string(value)
-        case let value as Bool:
-            return .bool(value)
-        case let value as NSNumber:
-            return .number(value.doubleValue)
-        case let value as [String: Any]:
-            return .object(value.mapValues(Self.jsonValue))
-        case let value as [Any]:
-            return .array(value.map(Self.jsonValue))
-        default:
-            return .null
-        }
+        return object.mapValues { JSONValue(any: $0) }
     }
 
     nonisolated private static func stringValue(from value: Any) -> String {
