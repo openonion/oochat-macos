@@ -123,6 +123,7 @@ struct MessageView: View {
                 Spacer()
                 Text(message.content)
                     .font(.system(size: fontSize - 2))
+
                     .foregroundColor(.secondary)
                     .padding(8)
                     .background(Capsule().fill(Color.secondary.opacity(0.1)))
@@ -148,9 +149,10 @@ struct MessageView: View {
                             .font(.system(size: AppFontSize.footnote, weight: .medium))
                     }
                 }
+                // editing the size of copy button based on UI feedback
                 .foregroundStyle(didCopy ? AppPalette.success : Color.secondary)
-                .frame(height: 20)
-                .padding(.horizontal, 5)
+                .frame(minWidth: 28, minHeight: 28)
+                .padding(.horizontal, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -168,9 +170,10 @@ struct MessageView: View {
                                 )
                             )
                     }
+                    // edit retry button based on UI feedback.
                     .foregroundStyle(Color.secondary)
-                    .frame(height: 20)
-                    .padding(.horizontal, 5)
+                    .frame(minWidth: 28, minHeight: 28)
+                    .padding(.horizontal, 6)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -180,7 +183,8 @@ struct MessageView: View {
                 .help(canRetry ? "Retry" : "Retry unavailable")
             }
         }
-        .frame(height: 20)
+        // adjust row container to account for larger UI buttons.
+        .frame(height: 28)
         .opacity(isHovered || didCopy ? 1 : 0)
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .onHover(perform: updateHover)

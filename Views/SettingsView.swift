@@ -6,11 +6,15 @@
 //
 
 import SwiftUI
+import ConnectOnionKit
 
 /// Composes account, Docker, appearance, and agent management settings.
 struct SettingsView: View {
     @Binding var appearanceMode: AppearanceMode
     @ObservedObject var appViewModel: AppViewModel
+    @State private var hoveredUsage = false
+    @State private var hoveredBalance = false
+    @State private var hoveredAgent = false
 
     let onBack: () -> Void
 
@@ -45,22 +49,18 @@ struct SettingsView: View {
                             }
                         }
 
-                        AccountTitleView()
-                            .padding(.top, 12)
+                        usageButton
 
-                        BalanceAndAddressView()
+                        balanceButton
 
-                        DockerConfigurationView(
-                            dockerRuntime: DockerRuntimeManager.shared
-                        )
+                        // BalanceView(appViewModel: appViewModel)
+
+                        agentButton
+
+                        // AgentControlPanel(appViewModel: appViewModel)
+                        //     .frame(maxWidth: .infinity)
 
                         AppearanceSettingsView(appearanceMode: $appearanceMode)
-
-                        AgentsTitleView()
-                            .padding(.top, 8)
-
-                        AgentControlPanel(appViewModel: appViewModel)
-                            .frame(maxWidth: .infinity)
                     }
                     .frame(maxWidth: 920, alignment: .leading)
                     .padding(.horizontal, geometry.size.width < 760 ? 20 : 32)
@@ -73,88 +73,110 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
     }
-}
 
-/// Exposes the runtime `.env` and restarts Docker-managed agents after edits.
-struct DockerConfigurationView: View {
-    @ObservedObject var dockerRuntime: DockerRuntimeManager
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Docker configuration")
-                        .font(.system(size: AppFontSize.subheadline, weight: .semibold))
-
-                    Text(
-                        "Add provider API keys to the runtime .env, "
-                            + "then apply the configuration to restart every Agent."
-                    )
-                    .font(.system(size: AppFontSize.body))
-                    .foregroundStyle(.secondary)
-                }
-
+    private var usageButton: some View {
+        Button {
+            guard appViewModel.selection != .usage else { return }
+            appViewModel.previousSelection = appViewModel.selection
+            appViewModel.selection = .usage
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chart.bar.xaxis")
+                    .font(.system(size: AppFontSize.subheadline, weight: .medium))
+                Text("Usage")
+                    .font(.system(size: AppFontSize.body, weight: .semibold))
                 Spacer()
-
-                if dockerRuntime.status.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                }
             }
-
-            Text(dockerRuntime.configurationFilePath)
-                .font(AppTypography.mono(size: AppFontSize.footnote))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-
-            HStack(spacing: 10) {
-                Button("Reveal .env") {
-                    dockerRuntime.revealConfigurationFile()
-                }
-                .buttonStyle(.bordered)
-
-                Button("Copy Path") {
-                    dockerRuntime.copyConfigurationPath()
-                }
-                .buttonStyle(.bordered)
-
-                Spacer()
-
-                Button("Apply & Restart") {
-                    Task {
-                        await dockerRuntime.applyConfigurationAndRestart()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(dockerRuntime.status.isBusy)
-            }
-
-            if let message = dockerRuntime.configurationActionMessage {
-                Text(message)
-                    .font(.system(size: AppFontSize.footnote))
-                    .foregroundStyle(
-                        dockerRuntime.status.isError ? AppPalette.error : .secondary
+            .foregroundColor(.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        appViewModel.selection == .usage
+                            ? OOColor.hover
+                            : (hoveredUsage ? OOColor.surface : Color.clear)
                     )
-            }
+            )
+            .contentShape(Rectangle())
         }
-        .padding(18)
-        .cardStyle(cornerRadius: 12)
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            hoveredUsage = isHovering
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Usage")
+        .help("View local model usage")
     }
-}
 
-/// Labels the account and wallet settings section.
-struct AccountTitleView: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Account & Wallet")
-                .font(.system(size: AppFontSize.sectionTitle, weight: .semibold))
-
-            Text("Manage your ConnectOnion identity, credentials, and credits")
-                .font(.system(size: AppFontSize.body))
-                .foregroundColor(.secondary)
+    private var balanceButton: some View {
+        Button {
+            guard appViewModel.selection != .balance else { return }
+            appViewModel.previousSelection = appViewModel.selection
+            appViewModel.selection = .balance
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "wallet.pass")
+                    .font(.system(size: AppFontSize.subheadline, weight: .medium))
+                Text("Wallet and Docker")
+                    .font(.system(size: AppFontSize.body, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        appViewModel.selection == .balance
+                            ? OOColor.hover
+                            : (hoveredBalance ? OOColor.surface : Color.clear)
+                    )
+            )
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            hoveredBalance = isHovering
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Usage")
+        .help("View local model usage")
+    }
+
+    private var agentButton: some View {
+        Button {
+            guard appViewModel.selection != .chooseAgent else { return }
+            appViewModel.previousSelection = appViewModel.selection
+            appViewModel.selection = .chooseAgent
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "person")
+                    .font(.system(size: AppFontSize.subheadline, weight: .medium))
+                Text("Manage Agents")
+                    .font(.system(size: AppFontSize.body, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(
+                        appViewModel.selection == .chooseAgent
+                            ? OOColor.hover
+                            : (hoveredAgent ? OOColor.surface : Color.clear)
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            hoveredAgent = isHovering
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Agents")
+        .help("View and manage agents")
     }
 }
 
@@ -186,20 +208,6 @@ struct AppearanceSettingsView: View {
         }
         .padding(18)
         .cardStyle(cornerRadius: 12)
-    }
-}
-
-/// Labels the connected-agent management section.
-struct AgentsTitleView: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Agents")
-                .font(.system(size: AppFontSize.sectionTitle, weight: .semibold))
-
-            Text("Add and manage 0x addresses or Direct URLs")
-                .font(.system(size: AppFontSize.body))
-                .foregroundColor(.secondary)
-        }
     }
 }
 
@@ -418,7 +426,9 @@ struct AgentControlPanel: View {
 
                     Text(statusLabel(for: snapshot))
                         .font(.system(size: AppFontSize.footnote, weight: .semibold))
-                        .foregroundStyle(statusColor(for: snapshot))
+                        .foregroundStyle(
+                            snapshot?.state == .invalid ? AppPalette.warningText : statusColor(for: snapshot)
+                        )
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(
@@ -443,7 +453,7 @@ struct AgentControlPanel: View {
                             .font(.system(size: AppFontSize.body, weight: .medium))
                     }
                     .buttonStyle(.plain)
-                    .foregroundColor(.secondary.opacity(0.7))
+                    .foregroundColor(OOColor.inkSecondary)
                     .accessibilityLabel("Copy agent address")
                     .help("Copy agent address")
                 }
@@ -478,7 +488,7 @@ struct AgentControlPanel: View {
                 .font(.system(size: 15, weight: .semibold))
         }
         .buttonStyle(.plain)
-        .foregroundColor(.secondary.opacity(0.7))
+        .foregroundColor(OOColor.inkSecondary)
         .accessibilityLabel("Edit agent avatar colors")
         .help("Edit avatar colors")
         .popover(
@@ -501,7 +511,7 @@ struct AgentControlPanel: View {
                 .font(.system(size: AppFontSize.subheadline, weight: .semibold))
         }
         .buttonStyle(.plain)
-        .foregroundColor(.secondary.opacity(0.7))
+        .foregroundColor(OOColor.inkSecondary)
         .accessibilityLabel("Refresh agent status")
         .help("Refresh status")
 
@@ -512,7 +522,7 @@ struct AgentControlPanel: View {
                 .font(.system(size: 15, weight: .semibold))
         }
         .buttonStyle(.plain)
-        .foregroundColor(.secondary.opacity(0.7))
+        .foregroundColor(OOColor.inkSecondary)
         .accessibilityLabel("Remove agent")
         .help("Remove agent")
     }

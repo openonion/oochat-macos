@@ -1,209 +1,180 @@
 import SwiftUI
+import ConnectOnionKit
 
 struct WelcomeHomeView: View {
     let configuration: GeneralAgentConfiguration
     let isConnected: Bool
     let connectionSnapshot: AgentConnectionSnapshot?
+    let agentProfile: OIPAgentProfile?
     let onSelectPrompt: (String) -> Void
 
-    @State private var areToolsExpanded: Bool
+    @State private var areSkillsExpanded = true
+    @State private var hoveredSkillName: String?
 
-    private struct Suggestion {
-        let icon: String
-        let title: String
-        let description: String
-        let prompt: String
+    private var skills: [OIPAgentSkill] {
+        agentProfile?.skills ?? []
     }
 
-    private let suggestions: [Suggestion]
-
-    init(
-        configuration: GeneralAgentConfiguration,
-        isConnected: Bool,
-        connectionSnapshot: AgentConnectionSnapshot?,
-        areToolsExpanded: Bool = false,
-        onSelectPrompt: @escaping (String) -> Void
-    ) {
-        self.configuration = configuration
-        self.isConnected = isConnected
-        self.connectionSnapshot = connectionSnapshot
-        self.onSelectPrompt = onSelectPrompt
-        _areToolsExpanded = State(initialValue: areToolsExpanded)
-        suggestions = [
-            Suggestion(
-                icon: "questionmark.circle.fill",
-                title: "Ask a question",
-                description: "Get quick answers on anything",
-                prompt: "Can you help me understand "
-            ),
-            Suggestion(
-                icon: "doc.text.fill",
-                title: "Summarize text",
-                description: "Condense long text into key points",
-                prompt: "Please summarize the following: "
-            ),
-            Suggestion(
-                icon: "lightbulb.fill",
-                title: "Brainstorm ideas",
-                description: "Explore ideas and possibilities",
-                prompt: "Help me brainstorm ideas for "
-            )
-        ]
+    private var isUnnamed: Bool {
+        configuration.name.isEmpty || configuration.name.hasPrefix("0x")
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer(minLength: 20)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(configuration.name)
+                    .font(isUnnamed ? OOFont.mono(size: 24) : OOFont.headline(size: 36))
+                    .tracking(isUnnamed ? 0 : -0.72) // web: tracking-[-0.02em]
+                    .foregroundStyle(OOColor.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
 
-            AgentAvatarView(
-                name: configuration.name,
-                textColorHex: configuration.avatarTextColorHex,
-                backgroundColorHex: configuration.avatarBackgroundColorHex,
-                size: 56
-            )
+                if agentProfile == nil {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(OOColor.inkTertiary)
+                            .frame(width: 6, height: 6)
 
-            VStack(spacing: 8) {
+                        Text("Connecting")
+                            .font(.system(size: 14))
+                            .foregroundStyle(OOColor.inkSecondary)
+                    }
+                    .padding(.top, 8)
+                } else if !skills.isEmpty {
+                    skillsSection
+                        .padding(.top, 32)
+                }
+            }
+            .frame(maxWidth: 672, alignment: .topLeading) // web: max-w-[720] minus px-6
+            .padding(.horizontal, 24)
+            .padding(.top, 56)
+            .padding(.bottom, 16)
+            // the scroller belongs to the pane, so it sits at the far right
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .scrollIndicators(.visible)
+        .background {
+            LegacyScrollBarStyle()
+        }
+    }
+
+    private var skillsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    areSkillsExpanded.toggle()
+                }
+            } label: {
                 HStack(spacing: 8) {
-                    Text(configuration.name)
-                        .font(.system(size: AppFontSize.pageTitle, weight: .semibold))
-                        .foregroundColor(.primary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(OOColor.inkSecondary)
+                        .rotationEffect(.degrees(areSkillsExpanded ? 90 : 0))
 
-                    Circle()
-                        .fill(isConnected ? AppPalette.success : AppPalette.error)
-                        .frame(width: 7, height: 7)
-
-                    Text(isConnected ? "online" : "offline")
-                        .font(AppTypography.mono(size: AppFontSize.caption, weight: .medium))
-                        .foregroundColor(isConnected ? AppPalette.success : AppPalette.error)
+                    OOSectionHeader("Skills", count: skills.count)
                 }
-
-                Text(metadataText)
-                    .font(AppTypography.mono(size: AppFontSize.caption))
-                    .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityValue(areSkillsExpanded ? "Expanded" : "Collapsed")
 
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 170), spacing: 10)],
-                spacing: 10
-            ) {
-                ForEach(suggestions, id: \.title) { suggestion in
-                    Button {
-                        onSelectPrompt(suggestion.prompt)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: suggestion.icon)
-                                .font(.system(size: AppFontSize.subheadline, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 24, height: 24)
+            if areSkillsExpanded {
+                VStack(spacing: 0) {
+                    ForEach(skills, id: \.name) { skill in
+                        Rectangle()
+                            .fill(OOColor.hairline)
+                            .frame(height: 1)
 
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(suggestion.title)
-                                    .font(.system(size: AppFontSize.body, weight: .medium))
-                                    .foregroundColor(.primary)
-
-                                Text(suggestion.description)
-                                    .font(.system(size: AppFontSize.footnote))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                            }
-
-                            Spacer(minLength: 0)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(AppPalette.surfaceMuted)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(maxWidth: 560)
-
-            if !tools.isEmpty {
-                VStack(spacing: 10) {
-                    Button {
-                        areToolsExpanded.toggle()
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text("\(tools.count) tools")
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .semibold))
-                                .rotationEffect(.degrees(areToolsExpanded ? 180 : 0))
-                        }
-                        .font(AppTypography.mono(size: AppFontSize.caption, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(areToolsExpanded ? "Hide agent tools" : "Show agent tools")
-                    .help(areToolsExpanded ? "Hide agent tools" : "Show agent tools")
-
-                    if areToolsExpanded {
-                        ScrollView {
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 120), spacing: 8)],
-                                alignment: .leading,
-                                spacing: 8
-                            ) {
-                                ForEach(tools, id: \.self) { tool in
-                                    Text(tool)
-                                        .font(AppTypography.mono(size: AppFontSize.footnote))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 10)
-                                        .frame(height: 32)
-                                        .background(AppPalette.surfaceMuted)
-                                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                                }
-                            }
-                        }
-                        .frame(maxWidth: 560, maxHeight: 180)
+                        skillRow(skill)
                     }
                 }
+                .padding(.top, 6)
             }
-
-            Spacer(minLength: 20)
         }
-        .padding(.horizontal, 32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var tools: [String] {
-        connectionSnapshot?.tools ?? []
+    private func skillRow(_ skill: OIPAgentSkill) -> some View {
+        Button {
+            onSelectPrompt("/\(skill.name) ")
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(readableTitle(for: skill.name))
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(OOColor.ink)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                Text(firstSentence(of: skill.description ?? ""))
+                    .font(.system(size: 14))
+                    .foregroundStyle(OOColor.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if isConnected {
+                    Text("Use →")
+                        .font(.system(size: 13))
+                        .foregroundStyle(OOColor.inkSecondary)
+                        .fixedSize()
+                        .opacity(hoveredSkillName == skill.name ? 1 : 0)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering in
+            if isHovering {
+                hoveredSkillName = skill.name
+            } else if hoveredSkillName == skill.name {
+                hoveredSkillName = nil
+            }
+        }
+        .disabled(!isConnected)
+        .opacity(isConnected ? 1 : 0.5)
     }
 
-    private var metadataText: String {
-        var parts: [String] = []
-
-        if let model = displayedModel {
-            parts.append(model)
-        }
-
-        if let trust = connectionSnapshot?.trust?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trust.isEmpty {
-            parts.append(trust)
-        }
-
-        if let version = connectionSnapshot?.version?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !version.isEmpty {
-            parts.append(version.hasPrefix("v") ? version : "v\(version)")
-        }
-
-        return parts.isEmpty ? "Hosted agent" : parts.joined(separator: " · ")
+    private func readableTitle(for name: String) -> String {
+        name
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map { word in
+                let value = String(word)
+                if value.lowercased() == "ai" { return "AI" }
+                return value.prefix(1).uppercased() + value.dropFirst()
+            }
+            .joined(separator: " ")
     }
 
-    private var displayedModel: String? {
-        let model = connectionSnapshot?.model
-        guard let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
+    private func firstSentence(of description: String) -> String {
+        guard let range = description.range(
+            of: #".+?[.!?。！？](?=\s|$)"#,
+            options: .regularExpression
+        ) else {
+            return description
         }
-        return trimmed.hasPrefix("co/") ? String(trimmed.dropFirst(3)) : trimmed
+
+        return String(description[range])
     }
 }
 
-#Preview {
-    ContentView()
+private struct LegacyScrollBarStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+
+        DispatchQueue.main.async {
+            view.enclosingScrollView?.scrollerStyle = .legacy
+        }
+
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            view.enclosingScrollView?.scrollerStyle = .legacy
+        }
+    }
 }

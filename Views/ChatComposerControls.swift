@@ -1,4 +1,5 @@
 import SwiftUI
+import ConnectOnionKit
 
 struct PendingAttachmentChip: View {
     let attachment: ConnectOnionInputFile
@@ -7,7 +8,7 @@ struct PendingAttachmentChip: View {
     var body: some View {
         HStack(spacing: 7) {
             Image(systemName: "doc.fill")
-                .foregroundColor(.accentColor)
+                .foregroundColor(AppPalette.brand)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.name)
@@ -26,8 +27,11 @@ struct PendingAttachmentChip: View {
             Button(action: remove) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Remove Attachment")
             .help("Remove attachment")
         }
         .padding(.leading, 10)
@@ -53,7 +57,7 @@ struct ExecutionModeSelector: View {
     var body: some View {
         HStack(spacing: 6) {
             HStack(spacing: 2) {
-                ForEach(AgentExecutionMode.allCases, id: \.self) { mode in
+                ForEach(viewModel.offeredExecutionModes, id: \.self) { mode in
                     Button {
                         select(mode)
                     } label: {
@@ -66,8 +70,8 @@ struct ExecutionModeSelector: View {
                             .frame(height: 24)
                             .foregroundColor(
                                 selected(mode)
-                                    ? AppPalette.primaryActionForeground
-                                    : .secondary
+                                    ? (mode == .accept ? OOColor.decisionText : AppPalette.primaryActionForeground)
+                                    : OOColor.inkSecondary
                             )
                             .background(selectionColor(mode))
                             .clipShape(RoundedRectangle(
@@ -125,16 +129,16 @@ struct ExecutionModeSelector: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: confirmationMessage)
-        .alert("Enable Accept mode?", isPresented: $isConfirmingAcceptMode) {
+        .alert("Enable Full access?", isPresented: $isConfirmingAcceptMode) {
             Button("Cancel", role: .cancel) {}
-            Button("Enable Accept", role: .destructive) {
+            Button("Enable Full access", role: .destructive) {
                 hasAcknowledgedAcceptWarning = true
                 viewModel.setExecutionMode(.accept)
             }
         } message: {
             Text(
-                "Accept mode allows the agent to use enabled tools without "
-                    + "approval for up to 10 turns."
+                "Full access lets the agent use enabled tools without "
+                    + "approval for the turns the host allows."
             )
         }
         .onChange(of: viewModel.confirmedExecutionMode) { _, mode in
@@ -172,7 +176,7 @@ struct ExecutionModeSelector: View {
 
     private func selectionColor(_ mode: AgentExecutionMode) -> Color {
         guard selected(mode) else { return .clear }
-        return mode == .accept ? AppPalette.error : AppPalette.primaryAction
+        return mode == .accept ? OOColor.decisionLine : AppPalette.primaryAction
     }
 }
 
@@ -188,7 +192,7 @@ private struct ExecutionModeGuide: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: mode.systemImage)
                         .font(.system(size: AppFontSize.body, weight: .medium))
-                        .foregroundStyle(mode == .accept ? AppPalette.error : .secondary)
+                        .foregroundStyle(mode == .accept ? OOColor.decisionText : .secondary)
                         .frame(width: 20, height: 20)
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -217,9 +221,9 @@ private struct ExecutionModeGuide: View {
 
     private func title(for mode: AgentExecutionMode) -> String {
         switch mode {
-        case .safe: return "Safe · Recommended"
-        case .plan: return "Plan"
-        case .accept: return "Accept · Up to 10 turns"
+        case .safe: return "Auto · Recommended"
+        case .plan: return "Read only"
+        case .accept: return "Full access"
         }
     }
 }

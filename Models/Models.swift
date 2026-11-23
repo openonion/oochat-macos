@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import Foundation
 
 /// How a saved configuration reaches its agent. Only `byAddress` is live; the
@@ -289,58 +290,6 @@ nonisolated struct EvalExecutionItem: Identifiable, Codable, Hashable, Sendable 
 nonisolated enum EvalStatus: String, Codable, Hashable, Sendable {
     case evaluating
     case done
-}
-
-/// A schema-free JSON value, used for tool arguments whose shape depends on
-/// the tool. Decoding probes concrete types in order and fails rather than
-/// silently dropping an unsupported value.
-nonisolated enum JSONValue: Codable, Hashable, Sendable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-        } else if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-        } else {
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Unsupported JSON value"
-            )
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .bool(let value):
-            try container.encode(value)
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
 }
 
 extension ExecutionItem {

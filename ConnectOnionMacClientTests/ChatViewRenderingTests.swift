@@ -137,7 +137,7 @@ extension ChatViewTests {
 
         XCTAssertEqual(request.riskLevel, .high)
         XCTAssertEqual(request.targetSummary, "/workspace/secret.txt")
-        XCTAssertEqual(request.plainEnglishExplanation, "Delete secret.txt.")
+        XCTAssertEqual(request.kitSummary, "Delete secret.txt.")
     }
 
     @MainActor
@@ -153,7 +153,7 @@ extension ChatViewTests {
             batchRemaining: []
         )
         XCTAssertEqual(
-            write.plainEnglishExplanation,
+            write.kitSummary,
             "Create or replace hi.md with the content supplied by the agent."
         )
 
@@ -166,7 +166,7 @@ extension ChatViewTests {
         )
         XCTAssertEqual(command.commandText, "git status --short")
         XCTAssertEqual(
-            command.plainEnglishExplanation,
+            command.kitSummary,
             "Run a Git status operation in the repository."
         )
     }
