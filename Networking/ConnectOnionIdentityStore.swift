@@ -1,3 +1,4 @@
+import ConnectOnionKit
 import CryptoKit
 import Foundation
 
@@ -18,14 +19,12 @@ nonisolated final class ConnectOnionIdentityStore {
     func loadOrCreateIdentity() throws -> ConnectOnionIdentity {
         lock.lock()
         defer { lock.unlock() }
+        return try loadOrCreateIdentityLocked()
+    }
 
-        if let cachedIdentity {
-            return cachedIdentity
-        }
-
-        if let data = try loadIdentityFile() {
-            let identity = try ConnectOnionIdentity(rawPrivateKey: data)
-            cachedIdentity = identity
+    /// Call with `lock` held.
+    private func loadOrCreateIdentityLocked() throws -> ConnectOnionIdentity {
+        if let identity = try storedIdentityLocked() {
             return identity
         }
 
@@ -33,6 +32,69 @@ nonisolated final class ConnectOnionIdentityStore {
         try saveIdentityFile(identity.rawPrivateKey)
         cachedIdentity = identity
         return identity
+    }
+
+    /// The identity in the cache or the key file, without minting one. Call with `lock` held.
+    private func storedIdentityLocked() throws -> ConnectOnionIdentity? {
+        if let cachedIdentity {
+            return cachedIdentity
+        }
+        guard let data = try loadIdentityFile() else { return nil }
+        let identity = try ConnectOnionIdentity(rawPrivateKey: data)
+        cachedIdentity = identity
+        return identity
+    }
+
+    // MARK: Device Link
+
+    /// Takes on the key a Device Link delivered: writes it atomically in place of the current one,
+    /// so the next signature uses it, and marks this device linked. A malformed key changes nothing.
+    func replacePrivateKey(with rawKey: Data) throws {
+        let identity = try ConnectOnionIdentity(rawPrivateKey: rawKey)
+        lock.lock()
+        defer { lock.unlock() }
+        try saveIdentityFile(identity.rawPrivateKey)
+        cachedIdentity = identity
+        // The key is what matters: a flag that failed to write only leaves the viewer off.
+        try? writeLinkedFlag(for: identity)
+    }
+
+    /// Whether this device shares its Identity with another. The flag beside the key holds the
+    /// Address it was set for, so it counts only while that key is the current one: a lost and
+    /// re-created key reads as unlinked with nothing to clean up.
+    var isLinked: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let fileURL = try? identityFileURL(),
+              let flag = try? Data(contentsOf: Self.linkedFlagURL(for: fileURL)),
+              let identity = try? storedIdentityLocked()
+        else { return false }
+        return flag == Data(identity.address.utf8)
+    }
+
+    /// The Giving Device, once its Identity was sent.
+    func markLinked() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let identity = try storedIdentityLocked() else { throw CocoaError(.fileReadNoSuchFile) }
+        try writeLinkedFlag(for: identity)
+    }
+
+    /// The saved key, or nil if there is none yet. Never creates one.
+    func storedPrivateKey() throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try storedIdentityLocked()?.rawPrivateKey
+    }
+
+    private static func linkedFlagURL(for identityFileURL: URL) -> URL {
+        identityFileURL.appendingPathExtension("linked")
+    }
+
+    private func writeLinkedFlag(for identity: ConnectOnionIdentity) throws {
+        let fileURL = try identityFileURL()
+        try secureIdentityDirectory(at: fileURL.deletingLastPathComponent())
+        try Data(identity.address.utf8).write(to: Self.linkedFlagURL(for: fileURL), options: .atomic)
     }
 
     private func loadIdentityFile() throws -> Data? {
@@ -109,7 +171,7 @@ nonisolated struct ConnectOnionIdentity {
     }
 
     var address: String {
-        "0x" + privateKey.publicKey.rawRepresentation.hexString
+        "0x" + Hex.encode(privateKey.publicKey.rawRepresentation)
     }
 
     var rawPrivateKey: Data {
@@ -117,21 +179,14 @@ nonisolated struct ConnectOnionIdentity {
     }
 
     func canonicalJSON(for payload: [String: Any]) throws -> Data {
-        try JSONSerialization.data(
-            withJSONObject: payload,
-            options: [.sortedKeys]
-        )
+        CanonicalJSON.data(from: payload.mapValues { JSONValue(any: $0) })
     }
 
     func signature(for payload: [String: Any]) throws -> String {
         let canonical = try canonicalJSON(for: payload)
-        return try privateKey.signature(for: canonical).hexString
+        return Hex.encode(try privateKey.signature(for: canonical))
     }
 }
 
-/// Lowercase hex, the encoding the protocol uses for addresses and signatures.
-nonisolated private extension Data {
-    var hexString: String {
-        map { String(format: "%02x", $0) }.joined()
-    }
-}
+/// All mutable state is guarded by `lock`.
+extension ConnectOnionIdentityStore: @unchecked Sendable {}

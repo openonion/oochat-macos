@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import SwiftUI
 import XCTest
 @testable import ConnectOnionMacClient
@@ -50,6 +51,31 @@ final class SettingsViewTests: XCTestCase {
             )
         ]
         renderSettings(appViewModel: appViewModel, width: 1_100)
+    }
+
+    @MainActor
+    func testIdentitySettingsRendersThisDevicesAddressAndBothLinkRows() async throws {
+        let store = makeIdentityStore()
+        _ = try store.loadOrCreateIdentity()
+        render(IdentitySettingsView(identityStore: store), width: 680, height: 260)
+        render(IdentitySettingsView(identityStore: makeIdentityStore()), width: 1_100, height: 260)
+        XCTAssertEqual(DeviceLinkRole.giving.settingsTitle, "Link a new device")
+        XCTAssertEqual(DeviceLinkRole.receiving.settingsTitle, "Link from another device")
+    }
+
+    // The typed-code entry a Mac switches to; it waits for a Link Code, so rendering it opens no listener.
+    @MainActor
+    func testDeviceLinkSheetRendersTheTypedCodeEntry() async {
+        render(
+            DeviceLinkSheet(
+                role: .giving,
+                keyStore: InMemoryPrivateKeyStore(),
+                displaysCode: false,
+                handlers: DeviceLinkHandlers()
+            ),
+            width: 460,
+            height: 560
+        )
     }
 
     @MainActor
@@ -123,14 +149,11 @@ final class SettingsViewTests: XCTestCase {
         editingSessionState.editingSessionTitle = "Renamed Chat"
         var searchState = SidebarViewInitialState()
         searchState.searchText = "missing agent"
-        var collapsedState = SidebarViewInitialState()
-        collapsedState.isAgentsSectionExpanded = false
         let states = [
             hoveredState,
             editingAgentState,
             editingSessionState,
-            searchState,
-            collapsedState
+            searchState
         ]
 
         for state in states {
@@ -157,6 +180,13 @@ final class SettingsViewTests: XCTestCase {
             onBack: {}
         )
         render(view, width: width, height: 760)
+    }
+
+    private func makeIdentityStore() -> ConnectOnionIdentityStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SettingsViewTests-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return ConnectOnionIdentityStore(identityFileURL: directory.appendingPathComponent("identity"))
     }
 
     @MainActor

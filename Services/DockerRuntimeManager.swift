@@ -813,6 +813,8 @@ final class DockerRuntimeManager: ObservableObject {
 
     @Published private(set) var status: DockerRuntimeStatus = .idle
     @Published private(set) var configurationActionMessage: String?
+    /// Set by Apply Configuration and Restart Agents; the window asks before anything restarts.
+    @Published var isConfirmingRestart = false
 
     private let executor: DockerCommandExecuting
     private let fileManager: FileManager
@@ -925,6 +927,24 @@ final class DockerRuntimeManager: ObservableObject {
         } catch {
             status = .failed(DockerStartupFailure(error: error))
             configurationActionMessage = error.localizedDescription
+        }
+    }
+
+    /// The Docker menu's "Run Agents on This Mac" off: the same teardown as on quit, but off the
+    /// main thread, so the app keeps responding while the containers shut down.
+    func stop() async {
+        guard let service else {
+            status = .stopped
+            return
+        }
+        status = .stopping
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try service.stopSynchronously()
+            }.value
+            status = .stopped
+        } catch {
+            status = .failed(DockerStartupFailure(error: error))
         }
     }
 

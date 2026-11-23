@@ -36,6 +36,7 @@ final class DockerRuntimeLifecycleTests: XCTestCase {
 
         let appDelegate = AppDelegate(
             isRunningTests: { false },
+            runsLocalAgents: { true },
             startDockerRuntime: {
                 startCount += 1
             },
@@ -49,6 +50,71 @@ final class DockerRuntimeLifecycleTests: XCTestCase {
 
         XCTAssertEqual(startCount, 1)
         XCTAssertEqual(stopCount, 1)
+
+        // A Mac that only talks to remote agents never starts or stops Docker.
+        let remoteOnlyDelegate = AppDelegate(
+            isRunningTests: { false },
+            runsLocalAgents: { false },
+            startDockerRuntime: {
+                startCount += 1
+            },
+            stopDockerRuntime: {
+                stopCount += 1
+            }
+        )
+        remoteOnlyDelegate.applicationDidFinishLaunching(launchNotification)
+        await Task.yield()
+        remoteOnlyDelegate.applicationWillTerminate(terminateNotification)
+
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    // A local agent added by its 0x address looks remote, so a runtime that has run before also counts.
+    @MainActor
+    func testRunAgentsOnThisMacDefaultsOnWhenDockerHasRunBefore() throws {
+        let suiteName = "LocalAgentsSettingTests.\(UUID().uuidString)"
+        let storage = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { storage.removePersistentDomain(forName: suiteName) }
+        let runtime = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalAgentsSettingTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: runtime) }
+
+        XCTAssertFalse(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: runtime))
+
+        try Data().write(to: runtime.appendingPathComponent("docker-compose.yml"))
+        XCTAssertTrue(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: runtime))
+
+        storage.set(false, forKey: LocalAgentsSetting.storageKey)
+        XCTAssertFalse(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: runtime))
+    }
+
+    // Off by default; on when a saved agent is on localhost; the user's own choice wins either way.
+    @MainActor
+    func testRunAgentsOnThisMacDefaultsToWhetherAnAgentIsLocal() throws {
+        let suiteName = "LocalAgentsSettingTests.\(UUID().uuidString)"
+        let storage = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { storage.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: nil))
+
+        let remote = GeneralAgentConfiguration(
+            name: "Remote",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x\(String(repeating: "ab", count: 32))")
+        )
+        var local = remote
+        local.addressConfiguration = AgentAddressConfiguration(agentAddress: "http://127.0.0.1:8000")
+
+        storage.set(try JSONEncoder().encode([remote]), forKey: AppViewModel.configurationsStorageKey)
+        XCTAssertFalse(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: nil))
+
+        storage.set(try JSONEncoder().encode([remote, local]), forKey: AppViewModel.configurationsStorageKey)
+        XCTAssertTrue(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: nil))
+
+        storage.set(false, forKey: LocalAgentsSetting.storageKey)
+        XCTAssertFalse(LocalAgentsSetting.isOn(in: storage, runtimeDirectory: nil))
     }
 
     @MainActor
