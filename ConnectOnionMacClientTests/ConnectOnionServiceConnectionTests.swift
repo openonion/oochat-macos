@@ -28,9 +28,9 @@ final class ConnectOnionServiceConnectionTests: XCTestCase {
         XCTAssertFalse(service.isConnected)
         XCTAssertEqual(
             service.connectionError,
-            "Direct API configurations are no longer supported. Connect to a hosted ConnectOnion agent instead."
+            "Direct API configurations are no longer supported. Connect to a hosted agent instead."
         )
-        XCTAssertEqual(service.hostedAgentStatus, "Disconnected")
+        XCTAssertEqual(service.hostedAgentStatus, "Not Connected")
         XCTAssertNil(service.hostedAgentStatusDetail)
         XCTAssertFalse(service.isHostedAgentStatusLive)
         XCTAssertFalse(service.hostedFilesystemEnabled)
@@ -57,7 +57,7 @@ final class ConnectOnionServiceConnectionTests: XCTestCase {
 
         XCTAssertTrue(service.isConnected)
         XCTAssertNil(service.connectionError)
-        XCTAssertEqual(service.hostedAgentStatus, "Resolving")
+        XCTAssertEqual(service.hostedAgentStatus, "Connecting")
         XCTAssertNil(service.hostedAgentStatusDetail)
         XCTAssertFalse(service.isHostedAgentStatusLive)
         XCTAssertFalse(service.hostedFilesystemEnabled)
@@ -80,7 +80,7 @@ final class ConnectOnionServiceConnectionTests: XCTestCase {
 
         XCTAssertFalse(service.isConnected)
         XCTAssertFalse(service.isAgentRequestActive)
-        XCTAssertEqual(service.hostedAgentStatus, "Disconnected")
+        XCTAssertEqual(service.hostedAgentStatus, "Not Connected")
         XCTAssertNil(service.hostedAgentStatusDetail)
         XCTAssertNil(service.connectionError)
         XCTAssertEqual(service.desiredExecutionMode, .safe)

@@ -3,9 +3,7 @@ import Foundation
 /// Sidebar selection: a chat session or one of the fixed utility screens.
 enum NavigationItem: Hashable {
     case session(UUID)
-    case newConfiguration
-    case usage
-    case settings
+    case chooseAgent
 }
 
 /// Reachability of a configured agent as reported by its latest status probe.
@@ -67,4 +65,25 @@ nonisolated struct LocalAgentDefinition: Equatable, Sendable {
 #else
     static let automaticDiscoveryTargets: [LocalAgentDefinition] = []
 #endif
+}
+
+/// Outcome of the last History Restore attempt for one agent.
+enum HistoryRestoreState: Equatable {
+    case restored
+    /// Agent unreachable (or no direct endpoint); retried on its next connect.
+    case pending
+    case failed
+
+    /// Maps a restore error: unreachable is pending, rejection or bad answer is failed.
+    init(error: Error) {
+        self = error is URLError ? .pending : .failed
+    }
+
+    var label: String {
+        switch self {
+        case .restored: "History restored"
+        case .pending: "History pending"
+        case .failed: "History restore failed"
+        }
+    }
 }

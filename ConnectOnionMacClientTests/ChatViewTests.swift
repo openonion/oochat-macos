@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
+import ConnectOnionKit
 @testable import ConnectOnionMacClient
 
 final class ChatViewTests: XCTestCase {
@@ -470,7 +471,7 @@ final class ChatViewTests: XCTestCase {
                 configuration: welcomeViewModel.configuration,
                 isConnected: true,
                 connectionSnapshot: welcomeViewModel.connectionSnapshot,
-                areToolsExpanded: true,
+                agentProfile: Self.welcomeProfile(),
                 onSelectPrompt: { _ in }
             )
         )
@@ -488,17 +489,28 @@ final class ChatViewTests: XCTestCase {
                 batchRemaining: [.object(["tool": .string("archive_report")])]
             )
         )
-        let approvalCard = HostedInteractionCard(
-            viewModel: approvalViewModel,
-            conversationWidth: 720,
-            showsApprovalDetails: true,
-            showsApprovalOptions: false
-        )
-        renderView(approvalCard)
         renderView(
-            approvalCard.approvalOptionsPopover,
-            width: 340,
-            height: 220
+            HostedInteractionCard(
+                viewModel: approvalViewModel,
+                conversationWidth: 720,
+                confirmsTrust: true
+            )
+        )
+
+        approvalViewModel.pendingInteraction = .approval(
+            ConnectOnionApprovalRequest(
+                id: "run-command-approval",
+                tool: "run_command",
+                arguments: .object(["command": .string("ls -la")]),
+                description: nil,
+                batchRemaining: []
+            )
+        )
+        renderView(
+            HostedInteractionCard(
+                viewModel: approvalViewModel,
+                conversationWidth: 720
+            )
         )
 
         approvalViewModel.pendingInteraction = .approval(
@@ -513,41 +525,97 @@ final class ChatViewTests: XCTestCase {
         renderView(
             HostedInteractionCard(
                 viewModel: approvalViewModel,
-                conversationWidth: 720,
-                showsApprovalDetails: true
+                conversationWidth: 720
             )
         )
     }
 
+    /// An AGENT_PROFILE as the kit decodes it, the same route the real frame takes.
+    private static func welcomeProfile() -> OIPAgentProfile {
+        let frame: [String: JSONValue] = [
+            "type": .string("AGENT_PROFILE"),
+            "skills": .array([
+                .object([
+                    "name": .string("deploy"),
+                    "description": .string("Ship the current branch to production.")
+                ]),
+                .object([
+                    "name": .string("summarise"),
+                    "description": .string("Summarise a document you paste in.")
+                ])
+            ])
+        ]
+        guard case .agentProfile(let profile) = OIPServerFrame.decode(frame) else {
+            preconditionFailure("AGENT_PROFILE did not decode")
+        }
+        return profile
+    }
+
     @MainActor
-    func testChatViewRendersDropTargetAndHandlesFontShortcuts() {
-        let viewModel = makeViewModel()
-        render(viewModel, isFileDropTargeted: true)
+    func testAgentWithoutSkillsIsDescribedByItsTools() {
+        XCTAssertEqual(
+            WelcomeHomeView.capabilitySentence(tools: ["read_file", "write_file", "run_command", "web_fetch"]),
+            "Can read and edit files, run commands and browse the web."
+        )
+        XCTAssertEqual(WelcomeHomeView.capabilitySentence(tools: ["bash"]), "Can run commands.")
+        // Unknown tools only: no sentence, so the screen falls back to "Type a message to start."
+        XCTAssertNil(WelcomeHomeView.capabilitySentence(tools: ["get_weather"]))
+        XCTAssertNil(WelcomeHomeView.capabilitySentence(tools: []))
+    }
 
-        let chatView = ChatView(
-            viewModel: viewModel,
-            conversationWidth: 720
+    func testApprovalShowsArgumentsInlineWithoutRepeatingTheCommand() {
+        let write: [String: JSONValue] = ["path": .string("hi.md"), "content": .string("hello")]
+        XCTAssertEqual(
+            HostedInteractionCard.argumentLines(write, hidingCommand: false),
+            "content: hello\npath: hi.md"
         )
-        let plainEvent = keyEvent(characters: "a", modifiers: [])
-        let unknownCommand = keyEvent(characters: "x", modifiers: [.command])
 
-        XCTAssertTrue(chatView.handleKeyDown(plainEvent) === plainEvent)
-        XCTAssertNil(
-            chatView.handleKeyDown(
-                keyEvent(characters: "=", modifiers: [.command])
-            )
-        )
-        XCTAssertNil(
-            chatView.handleKeyDown(
-                keyEvent(characters: "-", modifiers: [.command])
-            )
-        )
-        XCTAssertNil(
-            chatView.handleKeyDown(
-                keyEvent(characters: "0", modifiers: [.command])
-            )
-        )
-        XCTAssertTrue(chatView.handleKeyDown(unknownCommand) === unknownCommand)
+        let command: [String: JSONValue] = ["command": .string("ls -la"), "cwd": .string("/tmp")]
+        XCTAssertEqual(HostedInteractionCard.argumentLines(command, hidingCommand: true), "cwd: /tmp")
+        XCTAssertNil(HostedInteractionCard.argumentLines(["cmd": .string("ls")], hidingCommand: true))
+    }
+
+    // Open while it runs, waits on you or failed; folded once done, skipped (never applied) or stopped.
+    @MainActor
+    func testDiffCardStartsOpenOnlyWhileThereIsSomethingToRead() {
+        XCTAssertTrue(FileChangeCard.startsOpen(for: .running))
+        XCTAssertTrue(FileChangeCard.startsOpen(for: .awaitingApproval))
+        XCTAssertTrue(FileChangeCard.startsOpen(for: .failed))
+        XCTAssertFalse(FileChangeCard.startsOpen(for: .completed))
+        XCTAssertFalse(FileChangeCard.startsOpen(for: .skipped))
+        XCTAssertFalse(FileChangeCard.startsOpen(for: .interrupted))
+    }
+
+    // Only failures open by default; Skipped and Interrupted are your choices, not errors.
+    func testOnlyFailedToolCallsNeedAttention() {
+        func call(_ status: ExecutionStatus, result: String? = nil) -> ToolCallExecutionItem {
+            ToolCallExecutionItem(id: "t", name: "bash", args: [:], status: status, result: result, timingMS: nil)
+        }
+        XCTAssertTrue(call(.error).needsAttention)
+        XCTAssertTrue(call(.done, result: "Exit code: 2").needsAttention)
+        XCTAssertFalse(call(.done).needsAttention)
+        XCTAssertFalse(call(.skipped).needsAttention)
+        XCTAssertFalse(call(.interrupted).needsAttention)
+        XCTAssertFalse(call(.running).needsAttention)
+    }
+
+    // A status saved by a newer build reads as done, so the other saved traces still load.
+    func testAnUnknownSavedToolStatusReadsAsDone() throws {
+        let decoded = try JSONDecoder().decode([ExecutionStatus].self, from: Data(#"["skipped","paused_by_future"]"#.utf8))
+        XCTAssertEqual(decoded, [.skipped, .done])
+    }
+
+    @MainActor
+    func testChatViewRendersDropTarget() {
+        render(makeViewModel(), isFileDropTargeted: true)
+    }
+
+    // View ▸ Bigger, Smaller and Actual Size step by one point and stop at the ends.
+    func testChatFontSizeStepsAndStopsAtTheEnds() {
+        XCTAssertEqual(ChatFontSize.bigger(ChatFontSize.standard), 16)
+        XCTAssertEqual(ChatFontSize.smaller(ChatFontSize.standard), 14)
+        XCTAssertEqual(ChatFontSize.bigger(ChatFontSize.range.upperBound), ChatFontSize.range.upperBound)
+        XCTAssertEqual(ChatFontSize.smaller(ChatFontSize.range.lowerBound), ChatFontSize.range.lowerBound)
     }
 
     @MainActor
@@ -579,6 +647,65 @@ final class ChatViewTests: XCTestCase {
             )
         )
         render(interactionViewModel)
+    }
+
+    func testSkillPaletteNavigationMovesForwardAndBackward() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 3, offset: 1
+            ),
+            1
+        )
+
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 1, skillCount: 3, offset: -1
+            ),
+            0
+        )
+    }
+
+    func testSkillPaletteNavigationWrapsAtBothEnds() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 2, skillCount: 3, offset: 1
+            ),
+            0
+        )
+
+        XCTAssertEqual(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 3, offset: -1
+            ),
+            2
+        )
+    }
+
+    func testSkillPaletteNavigationHandlesEmptyList() {
+        XCTAssertNil(
+            SkillPaletteNavigation.movedIndex(
+                currentIndex: 0, skillCount: 0, offset: 1
+            )
+        )
+    }
+
+    func testSkillPaletteCompletionUsesSelectedSkill() {
+        XCTAssertEqual(
+            SkillPaletteNavigation.completion(
+                for: ["commit", "deploy", "review"],
+                selectedIndex: 1
+            ),
+            "/deploy "
+        )
+    }
+
+    func testSkillPaletteCompletionRejectsInvalidSelection() {
+        XCTAssertNil(
+            SkillPaletteNavigation.completion(
+                for: ["commit", "deploy"],
+                selectedIndex: 2
+            )
+        )
     }
 
 }

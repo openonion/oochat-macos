@@ -2,13 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleName</key>
+	<string>oo-chat</string>
 	<key>CFBundleGetInfoString</key>
 	<string></string>
 	<key>ATSApplicationFontsPath</key>
 	<string>Fonts</string>
 	<key>ConnectOnionDockerImage</key>
 	<string>ghcr.io/openonion/oochat-macos-agent:1.0.2</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_oochat-link._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Link this Mac with your other Apple devices over your local network, so they share your oo-chat identity.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Record voice messages for transcription by ConnectOnion.</string>
+	<string>oo-chat uses the microphone only when you dictate a message.</string>
 </dict>
 </plist>

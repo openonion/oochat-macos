@@ -1,6 +1,7 @@
 import Combine
 import CryptoKit
 import XCTest
+import ConnectOnionKit
 @testable import ConnectOnionMacClient
 
 enum StubRemoteOperation: Hashable {
@@ -14,6 +15,7 @@ enum StubRemoteOperation: Hashable {
     case planReview
     case ulwCheckpoint
     case inviteCode
+    case exec
 }
 
 private enum StubRemoteError: LocalizedError {
@@ -38,23 +40,36 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
     private var desiredMode: AgentExecutionMode = .safe
     private var confirmedMode: AgentExecutionMode = .safe
     let emitsApprovalOnSend: Bool
+    /// Sent after the stub's own events on each send.
+    let eventsOnSend: [ConnectOnionTransportEvent]
+    /// What `rewindLatestTurn` answers: false acts like a session with nothing to rewind.
+    let rewindSucceeds: Bool
 
     init(
         endpoint: ConnectOnionResolvedEndpoint,
         pendingExecution: Bool = false,
         failures: Set<StubRemoteOperation> = [],
-        emitsApprovalOnSend: Bool = false
+        emitsApprovalOnSend: Bool = false,
+        eventsOnSend: [ConnectOnionTransportEvent] = [],
+        rewindSucceeds: Bool = true
     ) async {
         self.endpoint = endpoint
+        self.rewindSucceeds = rewindSucceeds
         self.pendingExecution = pendingExecution
         self.failures = failures
         self.emitsApprovalOnSend = emitsApprovalOnSend
+        self.eventsOnSend = eventsOnSend
     }
 
     func probe() async throws -> ConnectOnionResolvedEndpoint {
         calls.append("probe")
         try failIfNeeded(.probe)
         return endpoint
+    }
+
+    func rewindLatestTurn(prompt: String) async -> Bool {
+        calls.append("rewindLatestTurn:\(prompt)")
+        return rewindSucceeds
     }
 
     func hasPendingExecution() async -> Bool {
@@ -111,6 +126,9 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
             )
         }
         await onEvent(.modeChanged(.accept))
+        for event in eventsOnSend {
+            await onEvent(event)
+        }
         return "stub response"
     }
 
@@ -169,14 +187,87 @@ actor StubRemoteAgentClient: ConnectOnionRemoteAgentProviding {
             )
         )
         await onEvent(.modeChanged(.plan))
+        for event in eventsOnRecover {
+            await onEvent(event)
+        }
     }
 
     func disconnect() async {
         calls.append("disconnect")
     }
 
+    /// Events a viewer socket would deliver; empty means the socket ends at once.
+    var observedEvents: [ConnectOnionTransportEvent] = []
+
+    /// Keeps the viewer socket open after its events, as a turn still streaming does.
+    var holdsObservedTurnOpen = false
+
+    func setObservedEvents(_ events: [ConnectOnionTransportEvent], holdOpen: Bool = false) {
+        observedEvents = events
+        holdsObservedTurnOpen = holdOpen
+    }
+
+    /// Runs once the viewer socket is up, before its events (a local send can start by then).
+    var onObserveStart: (@MainActor @Sendable () -> Void)?
+
+    func setOnObserveStart(_ hook: (@MainActor @Sendable () -> Void)?) {
+        onObserveStart = hook
+    }
+
+    func observe(
+        onUpdate _: @escaping ConnectOnionRemoteAgentClient.UpdateHandler,
+        onEvent: @escaping ConnectOnionRemoteAgentClient.EventHandler
+    ) async -> ViewerEnding {
+        calls.append("observe")
+        let events = observedEvents
+        observedEvents = []
+        if let onObserveStart { await onObserveStart() }
+        for event in events { await onEvent(event) }
+        if holdsObservedTurnOpen { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+        return events.isEmpty ? .closed : .turnFinished
+    }
+
+    var execReply: [String: JSONValue] = ["status": .string("success"), "result": .string("stub output")]
+
+    func runExec(
+        execID: String,
+        tool: String,
+        args _: [String: JSONValue]
+    ) async throws -> OIPExecResult {
+        calls.append("runExec:\(tool)")
+        try failIfNeeded(.exec)
+        var frame = execReply
+        frame["type"] = .string("EXEC_RESULT")
+        frame["exec_id"] = .string(execID)
+        frame["tool"] = .string(tool)
+        guard case .execResult(let result) = OIPServerFrame.decode(frame) else {
+            throw StubRemoteError.failed(.exec)
+        }
+        return result
+    }
+
+    // What the host sends on the profile visit after the probe (loadAgentProfile); empty = nothing.
+    var profileVisitEvents: [ConnectOnionTransportEvent] = []
+
+    func setProfileVisitEvents(_ events: [ConnectOnionTransportEvent]) {
+        profileVisitEvents = events
+    }
+
+    func loadAgentProfile(onEvent: @escaping ConnectOnionRemoteAgentClient.EventHandler) async throws {
+        for event in profileVisitEvents {
+            await onEvent(event)
+        }
+    }
+
     func setPendingExecution(_ value: Bool) {
         pendingExecution = value
+    }
+
+    /// Sent after the stub's own events on each recovery.
+    var eventsOnRecover: [ConnectOnionTransportEvent] = []
+
+    func setEventsOnRecover(_ events: [ConnectOnionTransportEvent]) {
+        eventsOnRecover = events
     }
 
     func setFailures(_ value: Set<StubRemoteOperation>) {

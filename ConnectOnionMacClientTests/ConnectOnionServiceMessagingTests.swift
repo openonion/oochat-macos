@@ -21,7 +21,7 @@ final class ConnectOnionServiceMessagingTests: XCTestCase {
 
         XCTAssertFalse(service.isConnected)
         let message =
-            "Direct API configurations are no longer supported. Connect to a hosted ConnectOnion agent instead."
+            "Direct API configurations are no longer supported. Connect to a hosted agent instead."
         XCTAssertEqual(service.connectionError, message)
         XCTAssertEqual(recorder.errors, [message])
     }
@@ -47,7 +47,7 @@ final class ConnectOnionServiceMessagingTests: XCTestCase {
         XCTAssertFalse(service.isConnected)
         XCTAssertEqual(
             recorder.errors,
-            ["Enter a valid ConnectOnion 0x address or HTTP(S) Direct URL"]
+            ["Enter a valid 0x address or HTTP(S) Direct URL"]
         )
     }
 }

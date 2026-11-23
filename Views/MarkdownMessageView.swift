@@ -666,10 +666,16 @@ private struct CopyableCodeBlock: View {
                     Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                         .labelStyle(.titleAndIcon)
                         .font(.system(size: max(10, fontSize - 2), weight: .medium))
+                        // add these properties to fix the copy code block button ui.
+                        .padding(.horizontal, 6)
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(didCopy ? Color.green : Color.secondary)
                 .accessibilityLabel(didCopy ? "Code copied" : "Copy code")
+                // Add tool tip for better UX.
+                .help(didCopy ? "Code Copied" : "Copy Code")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

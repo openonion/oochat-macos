@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import SwiftUI
 import XCTest
 @testable import ConnectOnionMacClient
@@ -32,7 +33,7 @@ final class SettingsViewTests: XCTestCase {
                 route: .relay,
                 remoteName: nil,
                 tools: [],
-                detail: "ConnectOnion relay"
+                detail: "Relay"
             ),
             offline.id: AgentConnectionSnapshot(
                 state: .offline,
@@ -53,18 +54,43 @@ final class SettingsViewTests: XCTestCase {
     }
 
     @MainActor
-    func testAppearanceSettingsRendersEveryMode() async {
-        for mode in AppearanceMode.allCases {
-            var selectedMode = mode
-            let view = AppearanceSettingsView(
-                appearanceMode: Binding(
-                    get: { selectedMode },
-                    set: { selectedMode = $0 }
-                )
-            )
-            render(view, width: 600, height: 100)
-            XCTAssertEqual(selectedMode, mode)
-        }
+    func testIdentitySettingsRendersThisDevicesAddressAndBothLinkRows() async throws {
+        let store = makeIdentityStore()
+        _ = try store.loadOrCreateIdentity()
+        render(IdentitySettingsView(identityStore: store), width: 680, height: 260)
+        render(IdentitySettingsView(identityStore: makeIdentityStore()), width: 1_100, height: 260)
+        XCTAssertEqual(DeviceLinkRole.giving.settingsTitle, "Link a new device")
+        XCTAssertEqual(DeviceLinkRole.receiving.settingsTitle, "Link from another device")
+    }
+
+    // The typed-code entry a Mac switches to; it waits for a Link Code, so rendering it opens no listener.
+    @MainActor
+    func testDeviceLinkSheetRendersTheTypedCodeEntry() async {
+        render(
+            DeviceLinkSheet(
+                role: .giving,
+                keyStore: InMemoryPrivateKeyStore(),
+                displaysCode: false,
+                handlers: DeviceLinkHandlers()
+            ),
+            width: 460,
+            height: 560
+        )
+    }
+
+    @MainActor
+    func testEachSettingsTabRenders() async {
+        render(GeneralSettingsView(), width: 700, height: 580)
+        render(LocalAgentsSettingsView(dockerRuntime: .shared, appViewModel: makeAppViewModel()), width: 700, height: 580)
+        render(AgentsSettingsView(appViewModel: makeAppViewModel()), width: 700, height: 580)
+    }
+
+    func testAgentRowStatusSaysHowTheAgentIsReached() {
+        let direct = AgentConnectionSnapshot(state: .online, route: .direct, remoteName: nil, tools: [], detail: nil)
+        let relay = AgentConnectionSnapshot(state: .online, route: .relay, remoteName: nil, tools: [], detail: nil)
+        XCTAssertEqual(AgentSettingsRow.statusLabel(for: direct), "Online \u{00B7} Direct")
+        XCTAssertEqual(AgentSettingsRow.statusLabel(for: relay), "Online \u{00B7} Relay")
+        XCTAssertEqual(AgentSettingsRow.statusLabel(for: nil), "Checking")
     }
 
     @MainActor
@@ -114,7 +140,6 @@ final class SettingsViewTests: XCTestCase {
         hoveredState.hoveredConfigId = primaryAgent.id
         hoveredState.hoveredSessionId = currentSession.id
         hoveredState.hoveredNewChat = true
-        hoveredState.hoveredSettings = true
         var editingAgentState = SidebarViewInitialState()
         editingAgentState.editingAgentId = primaryAgent.id
         editingAgentState.editingAgentName = "Renamed Agent"
@@ -123,14 +148,11 @@ final class SettingsViewTests: XCTestCase {
         editingSessionState.editingSessionTitle = "Renamed Chat"
         var searchState = SidebarViewInitialState()
         searchState.searchText = "missing agent"
-        var collapsedState = SidebarViewInitialState()
-        collapsedState.isAgentsSectionExpanded = false
         let states = [
             hoveredState,
             editingAgentState,
             editingSessionState,
-            searchState,
-            collapsedState
+            searchState
         ]
 
         for state in states {
@@ -147,16 +169,21 @@ final class SettingsViewTests: XCTestCase {
 
     @MainActor
     private func renderSettings(appViewModel: AppViewModel, width: CGFloat) {
-        var appearanceMode = AppearanceMode.system
         let view = SettingsView(
-            appearanceMode: Binding(
-                get: { appearanceMode },
-                set: { appearanceMode = $0 }
-            ),
             appViewModel: appViewModel,
-            onBack: {}
+            usageStore: UsageStore(
+                fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("usage-\(UUID().uuidString).json")
+            ),
+            identityStore: makeIdentityStore()
         )
         render(view, width: width, height: 760)
+    }
+
+    private func makeIdentityStore() -> ConnectOnionIdentityStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SettingsViewTests-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return ConnectOnionIdentityStore(identityFileURL: directory.appendingPathComponent("identity"))
     }
 
     @MainActor

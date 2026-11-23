@@ -1,4 +1,5 @@
 import AppKit
+import ConnectOnionKit
 import SwiftUI
 import XCTest
 @testable import ConnectOnionMacClient
@@ -45,6 +46,84 @@ extension ChatViewTests {
         )
 
         render(viewModel)
+    }
+
+    @MainActor
+    func testProviderInvocationShowsWorkRoomCardInPlaceOfItsToolCall() {
+        var run = ExecutionRun(sessionId: UUID(), userMessageId: nil)
+        run.items = [
+            .toolCall(ToolCallExecutionItem(id: "call-7", name: "run_codex", args: [:], status: .running))
+        ]
+        let viewModel = makeViewModel(
+            messages: [ChatMessage(sessionId: UUID(), role: .user, content: "Build it")],
+            executionRuns: [run]
+        )
+        // The Kit fixture provider_invocation.json, through the app's frame path.
+        viewModel.handleIncomingEvent(
+            .workRoomFrame(
+                OIPServerFrame.decode([
+                    "type": .string("provider_invocation"),
+                    "invocationId": .string("codex:call-7"),
+                    "parentToolCallId": .string("call-7"),
+                    "provider": .string("codex"),
+                    "providerDisplayName": .string("Codex"),
+                    "taskTitle": .string("Build and verify the requested C program"),
+                    "currentSummary": .string("Working in the selected workspace"),
+                    "permissionMode": .string("manual"),
+                    "sessionId": .string("codex-session-1"),
+                    "status": .string("running"),
+                    "stateRevision": .number(1),
+                    "workroomId": .string("codex:call-7")
+                ])
+            )
+        )
+
+        let entries = ChatViewPresentation.traceEntries(
+            viewModel.executionRuns.flatMap(\.items),
+            workRooms: viewModel.workRooms
+        )
+        XCTAssertEqual(entries.map(\.id), ["call-7"])
+        guard case .workRoom(let workRoom)? = entries.first else {
+            return XCTFail("the outer tool call should be replaced by a Work Room Card")
+        }
+        XCTAssertEqual(workRoom.toolCallID, "call-7")
+        XCTAssertEqual(workRoom.title, "Build and verify the requested C program")
+        XCTAssertEqual(workRoom.status, .running)
+        render(viewModel)
+    }
+
+    @MainActor
+    func testReconnectSnapshotBuildsWorkRoomCardWithoutLiveFrames() throws {
+        var run = ExecutionRun(sessionId: UUID(), userMessageId: nil)
+        run.items = [
+            .toolCall(ToolCallExecutionItem(id: "call-7", name: "run_codex", args: [:], status: .running))
+        ]
+        let viewModel = makeViewModel(
+            messages: [ChatMessage(sessionId: UUID(), role: .user, content: "Build it")],
+            executionRuns: [run]
+        )
+        let connected = Data(
+            """
+            {"type":"CONNECTED","status":"connected","server_newer":true,"chat_items":[
+              {"id":"codex:call-7","type":"provider_invocation","invocationId":"codex:call-7",
+               "parentToolCallId":"call-7","provider":"codex","status":"running","stateRevision":3,
+               "taskTitle":"Build and verify the requested C program"}]}
+            """.utf8
+        )
+        guard case .established(let snapshot) = try OIPHandshake.interpret(connected) else {
+            return XCTFail("CONNECTED should establish the connection")
+        }
+
+        viewModel.handleIncomingEvent(.workRoomSnapshot(snapshot))
+
+        let entries = ChatViewPresentation.traceEntries(
+            viewModel.executionRuns.flatMap(\.items),
+            workRooms: viewModel.workRooms
+        )
+        guard case .workRoom(let workRoom)? = entries.first else {
+            return XCTFail("the snapshot should rebuild the Work Room Card")
+        }
+        XCTAssertEqual(workRoom.title, "Build and verify the requested C program")
     }
 
     @MainActor
@@ -125,8 +204,16 @@ extension ChatViewTests {
         )
     }
 
+    // Approvals saved before the risk label was removed still carry "risk"; they must still load.
+    func testSavedApprovalWithOldRiskFieldStillDecodes() throws {
+        let json = Data(#"{"id":"a","tool":"bash","risk":"low","decision":"approvedOnce"}"#.utf8)
+        let item = try JSONDecoder().decode(ApprovalExecutionItem.self, from: json)
+        XCTAssertEqual(item.tool, "bash")
+        XCTAssertEqual(item.decision, .approvedOnce)
+    }
+
     @MainActor
-    func testApprovalPresentationClassifiesRiskAndTarget() {
+    func testApprovalPresentationFindsTarget() {
         let request = ConnectOnionApprovalRequest(
             id: "delete-1",
             tool: "delete_file",
@@ -135,9 +222,8 @@ extension ChatViewTests {
             batchRemaining: []
         )
 
-        XCTAssertEqual(request.riskLevel, .high)
         XCTAssertEqual(request.targetSummary, "/workspace/secret.txt")
-        XCTAssertEqual(request.plainEnglishExplanation, "Delete secret.txt.")
+        XCTAssertEqual(request.kitSummary, "Delete secret.txt.")
     }
 
     @MainActor
@@ -153,7 +239,7 @@ extension ChatViewTests {
             batchRemaining: []
         )
         XCTAssertEqual(
-            write.plainEnglishExplanation,
+            write.kitSummary,
             "Create or replace hi.md with the content supplied by the agent."
         )
 
@@ -166,7 +252,7 @@ extension ChatViewTests {
         )
         XCTAssertEqual(command.commandText, "git status --short")
         XCTAssertEqual(
-            command.plainEnglishExplanation,
+            command.kitSummary,
             "Run a Git status operation in the repository."
         )
     }
@@ -377,4 +463,66 @@ extension ChatViewTests {
         XCTAssertEqual(result.map(\.id), [visible.id])
     }
 
+    // The request in flight shows before its first step, so the waiting row has somewhere to be.
+    @MainActor
+    func testExecutionRunsShowTheEmptyActiveRunOnly() async {
+        let sessionID = UUID()
+        let message = ChatMessage(sessionId: sessionID, role: .user, content: "Explain")
+        let active = ExecutionRun(sessionId: sessionID, userMessageId: message.id)
+        let stale = ExecutionRun(sessionId: sessionID, userMessageId: message.id)
+
+        let result = ChatViewPresentation.executionRuns(
+            for: message,
+            from: [stale, active],
+            activeRunID: active.id
+        )
+
+        XCTAssertEqual(result.map(\.id), [active.id])
+    }
+
+    // The waiting row covers an empty run and an intent with no ack yet, and goes once the ack arrives.
+    func testRunIsWaitingUntilSomethingVisibleArrives() {
+        var run = ExecutionRun(sessionId: UUID(), userMessageId: UUID())
+        XCTAssertTrue(run.isWaitingForFirstStep)
+
+        run.items = [.intent(IntentExecutionItem(id: "intent", status: .analyzing, ack: nil))]
+        XCTAssertTrue(run.isWaitingForFirstStep)
+
+        run.items = [.intent(IntentExecutionItem(id: "intent", status: .understood, ack: "On it"))]
+        XCTAssertFalse(run.isWaitingForFirstStep)
+
+        run.items = []
+        run.status = .done
+        XCTAssertFalse(run.isWaitingForFirstStep)
+    }
+
+    // Within 80 pt of the bottom new content keeps you there; further up, Latest shows instead.
+    func testChatScrollPositionFollowsOnlyNearTheBottom() {
+        XCTAssertTrue(ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_950).isAtBottom)
+        XCTAssertTrue(ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_920).isAtBottom)
+        XCTAssertFalse(ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_800).isAtBottom)
+    }
+
+    // A new message below you while you're following keeps you following; scrolling up yourself doesn't.
+    func testChatScrollPositionKeepsFollowingWhenContentGrowsBelow() {
+        let following = ChatScrollPosition(contentHeight: 2_000, visibleBottom: 2_000)
+        let grown = ChatScrollPosition(contentHeight: 2_300, visibleBottom: 2_000)
+        XCTAssertFalse(grown.isAtBottom)
+        XCTAssertTrue(grown.grewWhileFollowing(from: following))
+
+        let scrolledUp = ChatScrollPosition(contentHeight: 2_000, visibleBottom: 1_600)
+        XCTAssertFalse(scrolledUp.grewWhileFollowing(from: following))
+        XCTAssertFalse(grown.grewWhileFollowing(from: scrolledUp))
+
+        // Streaming: the reply grows in the same frame you scroll up. That's you scrolling.
+        let grownWhileScrollingUp = ChatScrollPosition(contentHeight: 2_100, visibleBottom: 1_880)
+        XCTAssertFalse(grownWhileScrollingUp.grewWhileFollowing(from: following))
+        XCTAssertFalse(grownWhileScrollingUp.isAtBottom)
+    }
+
+    // After ten seconds the row says "Still waiting" and offers Cancel.
+    func testWaitingRowSaysStillWaitingAfterTenSeconds() {
+        XCTAssertEqual(WaitingForAgentRow.status(agentName: "my-agent", seconds: 4), "Waiting for my-agent \u{00B7} 4 s")
+        XCTAssertEqual(WaitingForAgentRow.status(agentName: "my-agent", seconds: 12), "Still waiting \u{00B7} 12 s")
+    }
 }

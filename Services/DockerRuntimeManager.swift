@@ -813,6 +813,8 @@ final class DockerRuntimeManager: ObservableObject {
 
     @Published private(set) var status: DockerRuntimeStatus = .idle
     @Published private(set) var configurationActionMessage: String?
+    /// Set by Apply Configuration and Restart Agents; the window asks before anything restarts.
+    @Published var isConfirmingRestart = false
 
     private let executor: DockerCommandExecuting
     private let fileManager: FileManager
@@ -822,6 +824,8 @@ final class DockerRuntimeManager: ObservableObject {
     private let composeSourceOverride: URL?
     private var service: DockerRuntimeService?
     private var isStarting = false
+    /// False once local agents are turned off, so a start still under way stops what it brought up.
+    private var wantsRunning = true
 
     init(
         executor: DockerCommandExecuting = ProcessDockerCommandExecutor(),
@@ -848,6 +852,7 @@ final class DockerRuntimeManager: ObservableObject {
     /// Safe to call repeatedly: re-entry while starting or already ready is
     /// ignored, and any failure is classified for guided remediation.
     func start() async {
+        wantsRunning = true
         guard !isStarting, status != .ready else {
             return
         }
@@ -861,9 +866,14 @@ final class DockerRuntimeManager: ObservableObject {
             try await service.start { [weak self] progress in
                 self?.status = .starting(progress)
             }
+            guard wantsRunning else {
+                // Turned off while it was starting.
+                await stopService()
+                return
+            }
             status = .ready
         } catch {
-            status = .failed(DockerStartupFailure(error: error))
+            status = wantsRunning ? .failed(DockerStartupFailure(error: error)) : .stopped
         }
     }
 
@@ -928,7 +938,37 @@ final class DockerRuntimeManager: ObservableObject {
         }
     }
 
+    /// "Run agents on this Mac" off: the same teardown as on quit, but off the main thread, so the
+    /// app keeps responding while the containers shut down. A start still under way finishes
+    /// first and then stops what it brought up.
+    func stop() async {
+        wantsRunning = false
+        guard !isStarting else {
+            status = .stopping
+            return
+        }
+        await stopService()
+    }
+
+    private func stopService() async {
+        guard let service else {
+            status = .stopped
+            return
+        }
+        status = .stopping
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try service.stopSynchronously()
+            }.value
+            status = .stopped
+        } catch {
+            status = .failed(DockerStartupFailure(error: error))
+        }
+    }
+
+    /// Quitting only: blocks until the agents are down, so none outlive the app.
     func stopSynchronously() {
+        wantsRunning = false
         guard let service else {
             status = .stopped
             return

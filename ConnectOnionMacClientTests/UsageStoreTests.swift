@@ -363,7 +363,7 @@ final class UsageStoreTests: XCTestCase {
             (620.0, ColorScheme.dark)
         ] {
             let hostingView = NSHostingView(
-                rootView: UsageView(store: fixture.store, onClose: {})
+                rootView: UsageView(store: fixture.store)
                     .environment(\.colorScheme, scheme)
                     .frame(width: width, height: 760)
             )

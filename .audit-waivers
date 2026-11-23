@@ -27,3 +27,5 @@ ViewModels/AgentTypes.swift     endpoint  # The one built-in discovery target, i
 ViewModels/ViewModels.swift     endpoint  # Rejects loopback hosts when validating a
                                           # user-entered address; the literals are the
                                           # denylist itself.
+Models/Models.swift              endpoint  # Decides whether an agent runs on this Mac; the literals are the loopback hosts.
+ConnectOnionMacClientApp.swift   endpoint  # Comments describing the Run Agents on This Mac default (agents served from loopback).

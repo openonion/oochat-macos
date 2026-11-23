@@ -32,7 +32,7 @@ extension ConnectOnionRemoteAgentTests {
     /// icon, subtitle, and status chip — the behaviour the reference chat shows.
     func testToolPresentationClassifiesBuiltInToolFamilies() throws {
         // Bash: description arg becomes the subtitle, command drives the body,
-        // and success renders "EXIT CODE 0".
+        // and success renders "Done", with no exit code.
         let bash = try toolCall(
             name: "bash",
             args: [
@@ -46,7 +46,7 @@ extension ConnectOnionRemoteAgentTests {
         XCTAssertEqual(bash.category.icon, "terminal")
         XCTAssertEqual(bash.subtitle, "Check home directory contents to locate Desktop")
         XCTAssertEqual(bash.shellCommand, "echo $HOME && ls -la $HOME")
-        XCTAssertEqual(bash.statusLabel(timing: "0.0s"), "EXIT CODE 0 (0.0s)")
+        XCTAssertEqual(bash.statusLabel(timing: "0.0s"), "Done (0.0s)")
 
         // Failed shell parses the appended "Exit code: N" line.
         let failed = try toolCall(
@@ -56,9 +56,9 @@ extension ConnectOnionRemoteAgentTests {
             result: "STDERR:\nboom\n\nExit code: 2"
         )
         XCTAssertEqual(failed.shellExitCode, 2)
-        XCTAssertEqual(failed.statusLabel(timing: nil), "EXIT CODE 2")
+        XCTAssertEqual(failed.statusLabel(timing: nil), "Exit code 2")
 
-        // Write (no diff) → fileWrite, filename subtitle, DONE chip.
+        // Write (no diff) → fileWrite, filename subtitle, Done chip.
         let write = try toolCall(
             name: "write",
             args: ["path": "/Users/demo/Desktop/untitled.md", "content": ""],
@@ -67,7 +67,7 @@ extension ConnectOnionRemoteAgentTests {
         XCTAssertEqual(write.category, .fileWrite)
         XCTAssertEqual(write.displayName, "Write")
         XCTAssertEqual(write.subtitle, "untitled.md")
-        XCTAssertEqual(write.statusLabel(timing: "0.0s"), "DONE (0.0s)")
+        XCTAssertEqual(write.statusLabel(timing: "0.0s"), "Done (0.0s)")
 
         // Each remaining family lands in its bucket.
         XCTAssertEqual(try toolCall(name: "read_file", args: ["path": "a/b/notes.txt"]).category, .fileRead)

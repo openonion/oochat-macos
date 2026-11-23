@@ -27,7 +27,6 @@ enum UsageValueFormatter {
 
 struct UsageView: View {
     @ObservedObject var store: UsageStore
-    let onClose: () -> Void
 
     @State private var selectedRange: UsageRange = .last7Days
     @State private var isConfirmingClear = false
@@ -41,17 +40,17 @@ struct UsageView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    header
                     introduction
 
                     if let storageError = store.storageError {
                         storageErrorBanner(storageError)
                     }
 
-                    UsageHeatmapView(snapshot: snapshot)
+                    // The period filters the totals and models under it; the year below always shows.
                     rangePicker
                     summaryCard(snapshot.totals)
                     modelCard(snapshot.models)
+                    UsageHeatmapView(snapshot: snapshot)
                     footer(
                         recordingSince: allTimeSnapshot.recordingSince,
                         canClear: allTimeSnapshot.totals.calls > 0
@@ -59,9 +58,7 @@ struct UsageView: View {
                     )
                 }
                 .frame(maxWidth: 1040, alignment: .leading)
-                .padding(.horizontal, 28)
-                .padding(.top, 24)
-                .padding(.bottom, 30)
+                .padding(24)
                 .frame(maxWidth: .infinity)
             }
         }
@@ -79,33 +76,8 @@ struct UsageView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center) {
-            Text("Usage")
-                .font(.system(size: AppFontSize.pageTitle, weight: .semibold))
-                .foregroundStyle(.primary)
-
-            Spacer()
-
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: AppFontSize.subheadline, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close Usage")
-            .help("Close Usage")
-        }
-    }
-
     private var introduction: some View {
-        Text(
-            "Token usage recorded on this device, grouped by model. "
-                + "Usage is kept after you delete a conversation or agent because "
-                + "the tokens were already spent, and it never leaves your Mac."
-        )
+        Text("Tokens your agents used, by model, kept on this Mac even after a chat is deleted.")
         .font(.system(size: AppFontSize.body))
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -122,35 +94,16 @@ struct UsageView: View {
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    // Native segmented control: the hand-drawn radio circles read as a form, not a filter.
     private var rangePicker: some View {
-        HStack(spacing: 30) {
+        Picker("Usage period", selection: $selectedRange) {
             ForEach(UsageRange.allCases) { range in
-                Button {
-                    selectedRange = range
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(
-                            systemName: selectedRange == range
-                                ? "largecircle.fill.circle"
-                                : "circle"
-                        )
-                        .font(.system(size: 16))
-
-                        Text(range.displayName)
-                            .font(.system(size: AppFontSize.body))
-                    }
-                    .foregroundStyle(
-                        selectedRange == range ? .primary : .secondary
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                Text(range.displayName).tag(range)
             }
-
-            Spacer(minLength: 0)
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Usage period")
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
     }
 
     @ViewBuilder
@@ -274,7 +227,7 @@ struct UsageView: View {
             .frame(height: 4)
 
             Text(
-                "\(model.totals.calls.formatted()) calls   "
+                "\(model.totals.calls.formatted()) \(model.totals.calls == 1 ? "call" : "calls")   "
                     + "\(UsageValueFormatter.compact(model.totals.inputTokens)) in   "
                     + "\(UsageValueFormatter.compact(model.totals.outputTokens)) out"
             )
@@ -303,10 +256,12 @@ struct UsageView: View {
 
             Spacer()
 
-            Button("Clear usage history") {
+            Button("Clear usage history", role: .destructive) {
                 isConfirmingClear = true
             }
             .buttonStyle(.bordered)
+            // The app's green tint colours bordered button text, so red has to be the tint.
+            .tint(AppPalette.error)
             .disabled(!canClear)
         }
     }
@@ -321,6 +276,8 @@ private struct UsageHeatmapView: View {
     private let columnCount = 53
     private let cellSpacing: CGFloat = 3
     private let weekdayLabelWidth: CGFloat = 32
+    /// Room a month label needs before the next one ("Nov" at footnote size, plus a gap).
+    private let monthLabelWidth: CGFloat = 30
 
     var body: some View {
         let grid = heatmapGrid()
@@ -342,9 +299,11 @@ private struct UsageHeatmapView: View {
                 )
                 .font(.system(size: AppFontSize.subheadline, weight: .semibold))
 
-                Text(dateRangeText(grid: grid))
+                // The heatmap always covers a year, whatever period is picked below it.
+                Text("Past 12 months")
                     .font(.system(size: AppFontSize.footnote))
                     .foregroundStyle(.secondary)
+                    .help(dateRangeText(grid: grid))
             }
 
             GeometryReader { geometry in
@@ -431,7 +390,7 @@ private struct UsageHeatmapView: View {
         ZStack(alignment: .leading) {
             Color.clear.frame(height: 14)
 
-            ForEach(monthLabelEntries(grid: grid), id: \.weekIndex) { entry in
+            ForEach(spacedMonthLabels(grid: grid, cellSize: cellSize), id: \.weekIndex) { entry in
                 Text(entry.date.formatted(.dateTime.month(.abbreviated)))
                     .font(.system(size: AppFontSize.footnote))
                     .foregroundStyle(.secondary)
@@ -439,6 +398,21 @@ private struct UsageHeatmapView: View {
                         x: CGFloat(entry.weekIndex) * (cellSize + cellSpacing)
                     )
             }
+        }
+    }
+
+    /// Drops a label with no room before the next one, as GitHub's chart does: usually the
+    /// part-month in the first columns, and more of them when the window is narrow.
+    private func spacedMonthLabels(
+        grid: [[Date]],
+        cellSize: CGFloat
+    ) -> [(weekIndex: Int, date: Date)] {
+        let entries = monthLabelEntries(grid: grid)
+        let columnWidth = cellSize + cellSpacing
+        return entries.enumerated().compactMap { index, entry in
+            guard index + 1 < entries.count else { return entry }
+            let room = CGFloat(entries[index + 1].weekIndex - entry.weekIndex) * columnWidth
+            return room >= monthLabelWidth ? entry : nil
         }
     }
 

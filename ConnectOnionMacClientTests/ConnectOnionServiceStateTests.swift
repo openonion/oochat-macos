@@ -1,4 +1,5 @@
 import Combine
+import ConnectOnionKit
 import CryptoKit
 import XCTest
 @testable import ConnectOnionMacClient
@@ -19,7 +20,7 @@ extension ConnectOnionServiceTests {
 
             XCTAssertFalse(service.isConnected)
             XCTAssertNil(service.connectionError)
-            XCTAssertEqual(service.hostedAgentStatus, "Disconnected")
+            XCTAssertEqual(service.hostedAgentStatus, "Not Connected")
             XCTAssertNil(service.hostedAgentStatusDetail)
             XCTAssertFalse(service.isHostedAgentStatusLive)
             XCTAssertFalse(service.hostedFilesystemEnabled)
@@ -52,6 +53,33 @@ extension ConnectOnionServiceTests {
         XCTAssertEqual(viewModel.configurations, [configuration])
         XCTAssertEqual(duplicateResult, .duplicate)
         XCTAssertEqual(viewModel.addAgent("0x1234"), .invalid)
+    }
+
+    // Adding an Address this Mac already has, in any case or known only behind a Direct URL, adds nothing;
+    // saving one with a name updates that agent.
+    @MainActor
+    func testAnAddressThisMacHasIsOneAgentHoweverItIsAdded() async throws {
+        let viewModel = AppViewModel(
+            storage: makeIsolatedDefaults(),
+            localAgentDefinitions: [],
+            resolveAgentEndpoint: { _ in throw ConnectOnionRemoteError.agentOffline }
+        )
+        var byURL = GeneralAgentConfiguration(
+            name: "Mine", connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "http://localhost:8000")
+        )
+        byURL.resolvedAddress = "0x" + String(repeating: "ab", count: 32)
+        viewModel.configurations = [byURL]
+
+        XCTAssertEqual(viewModel.addAgent("0X" + String(repeating: "Ab", count: 32)), .duplicate)
+        viewModel.saveAgent(GeneralAgentConfiguration(
+            name: "Renamed", connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: "0x" + String(repeating: "AB", count: 32))
+        ))
+
+        XCTAssertEqual(viewModel.configurations.map(\.id), [byURL.id])
+        XCTAssertEqual(viewModel.configurations.map(\.name), ["Renamed"])
+        XCTAssertEqual(viewModel.sessions.map(\.agentConfigId), [byURL.id])
     }
 
     @MainActor
@@ -126,6 +154,42 @@ extension ConnectOnionServiceTests {
                 version: "1.2.1"
             )
         )
+        XCTAssertEqual(viewModel.configurations.map(\.name), ["Saved Agent"], "the reported name never replaces a chosen one")
+    }
+
+    // An agent added by Address alone takes the name it reports, once, as its default.
+    @MainActor
+    func testTheReportedNameOnlyFillsTheDefaultOnAdd() async throws {
+        let address = "0x" + String(repeating: "ab", count: 32)
+        var reported = "Workspace Agent"
+        let viewModel = AppViewModel(
+            storage: makeIsolatedDefaults(),
+            localAgentDefinitions: [],
+            resolveAgentEndpoint: { _ in
+                ConnectOnionResolvedEndpoint(
+                    agentAddress: address, webSocketURL: URL(string: "wss://agent.example/ws")!,
+                    httpBaseURL: nil, isDirect: false,
+                    info: ConnectOnionAgentInfo(
+                        name: reported, address: address, tools: [], model: nil, trust: nil, version: nil, acceptedInputs: nil
+                    )
+                )
+            }
+        )
+        guard case .added(let configuration) = viewModel.addAgent(address) else { return XCTFail("added") }
+
+        await viewModel.refreshAgentStatusAndWait(for: configuration)
+        reported = "Renamed On The Host"
+        await viewModel.refreshAgentStatusAndWait(for: configuration)
+
+        XCTAssertEqual(viewModel.configurations.map(\.name), ["Workspace Agent"])
+
+        // A giver's name that happens to look like this Mac's default is still the giver's choice.
+        let linked = try XCTUnwrap(DeviceLinkAgentName(address: "0x" + String(repeating: "cd", count: 32), name: "0xcdcd…cdcd"))
+        viewModel.applyLinkedAgentNames([linked])
+        let arrived = try XCTUnwrap(viewModel.configurations.last)
+        await viewModel.refreshAgentStatusAndWait(for: arrived)
+
+        XCTAssertEqual(viewModel.configurations.last?.name, "0xcdcd…cdcd")
     }
 
     @MainActor
@@ -154,7 +218,7 @@ extension ConnectOnionServiceTests {
         )
         XCTAssertEqual(
             viewModel.agentConnectionSnapshots[configuration.id]?.detail,
-            "The ConnectOnion agent is offline"
+            "The agent is offline"
         )
     }
 
@@ -365,9 +429,10 @@ extension ConnectOnionServiceTests {
         XCTAssertEqual(sentRequests[0].prompt, "Describe this image")
         XCTAssertEqual(sentRequests[0].files, [attachment])
         XCTAssertEqual(sentRequests[1].files, [attachment])
+        // Redone in place: still one message of yours, the same one.
         XCTAssertEqual(
-            viewModel.messages.filter { $0.role == .user }.map(\.content),
-            ["Describe this image", "Describe this image"]
+            viewModel.messages.filter { $0.role == .user }.map(\.id),
+            [firstUserMessage.id]
         )
     }
 
@@ -490,11 +555,18 @@ extension ConnectOnionServiceTests {
         service.confirmedExecutionMode = .safe
         XCTAssertEqual(viewModel.desiredExecutionMode, .plan)
         XCTAssertEqual(viewModel.confirmedExecutionMode, .safe)
+        XCTAssertTrue(viewModel.isExecutionModeChangePending, "pending while idle too, until mode_changed")
+        service.confirmedExecutionMode = .plan
         XCTAssertFalse(viewModel.isExecutionModeChangePending)
 
-        service.isAgentRequestActive = true
-        XCTAssertTrue(viewModel.isExecutionModeChangePending)
-        service.isAgentRequestActive = false
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan], "accept hidden until the host lists it")
+        service.availableExecutionModes = [.safe, .plan, .accept]
+        XCTAssertEqual(viewModel.offeredExecutionModes, [.safe, .plan, .accept])
+
+        service.acceptTurnsLeft = 3
+        XCTAssertNil(viewModel.acceptTurnsLeft, "turns left only shows in accept")
+        service.confirmedExecutionMode = .accept
+        XCTAssertEqual(viewModel.acceptTurnsLeft, 3)
 
         let plan = ConnectOnionPlanReviewRequest(id: "plan-1", content: "# Plan")
         viewModel.handleIncomingEvent(.planReviewRequired(plan))
@@ -550,4 +622,296 @@ extension ConnectOnionServiceTests {
         XCTAssertEqual(savedMessages.last?.usage, usage)
     }
 
+    // A bash approval arrives as an ack, a tool call and approval_needed back to back. Events
+    // sent with no gap between them must all reach the chat: a stream with no buffer keeps only
+    // the first one sent while the previous is still being handled.
+    @MainActor
+    func testChatKeepsEveryEventInABurst() async {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        let configuration = GeneralAgentConfiguration(
+            name: "Main Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(
+                agentAddress: "0x" + String(repeating: "48", count: 32)
+            )
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Burst")
+        let service = ConnectOnionService(conversationID: session.id)
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: service,
+            appViewModel: appViewModel
+        )
+
+        func agentReplies() -> [String] {
+            viewModel.messages.filter { $0.role == .agent }.map(\.content)
+        }
+
+        // Events reach the chat through a Task, so wait. One first, so the chat is listening;
+        // the two after it come with no gap.
+        service.incomingEvents.send(.output("one"))
+        await waitUntil { agentReplies().count == 1 }
+        service.incomingEvents.send(.output("two"))
+        service.incomingEvents.send(.output("three"))
+        await waitUntil { agentReplies().count == 3 }
+
+        XCTAssertEqual(agentReplies(), ["one", "two", "three"])
+    }
+
+    // MARK: - Redo the latest turn in place
+
+    @MainActor
+    func testRetryRedoesTheLatestTurnInPlace() async throws {
+        let chat = try await makeChatWithOneTurn()
+        let yourMessage = try XCTUnwrap(chat.viewModel.messages.first { $0.role == .user })
+        let reply = try XCTUnwrap(chat.viewModel.messages.last { $0.role == .agent })
+
+        chat.viewModel.retryAgentMessage(reply)
+        await waitUntil {
+            await chat.remote.sentRequestSnapshot().count == 2
+                && !chat.service.isAgentRequestActive
+        }
+        // As in makeChatWithOneTurn: the stub's reply doesn't always reach the chat on its own.
+        if !chat.viewModel.messages.contains(where: { $0.role == .agent }) {
+            chat.viewModel.handleIncomingEvent(.output("Second response"))
+        }
+
+        let messages = chat.viewModel.messages
+        XCTAssertEqual(messages.filter { $0.role == .user }.map(\.id), [yourMessage.id])
+        XCTAssertEqual(messages.filter { $0.role == .agent }.count, 1)
+        XCTAssertFalse(messages.contains { $0.id == reply.id }, "the old reply is gone")
+        XCTAssertEqual(messages.first { $0.role == .user }?.status, .sent)
+    }
+
+    @MainActor
+    func testEditRedoesYourLatestMessageInPlace() async throws {
+        let chat = try await makeChatWithOneTurn()
+        let yourMessage = try XCTUnwrap(chat.viewModel.messages.first { $0.role == .user })
+        chat.viewModel.inputText = "Half-written draft"
+
+        chat.viewModel.editLatestMessage(yourMessage, to: "  Hello again ")
+        await waitUntil {
+            await chat.remote.sentRequestSnapshot().count == 2
+                && !chat.service.isAgentRequestActive
+        }
+
+        let sent = await chat.remote.sentRequestSnapshot()
+        XCTAssertEqual(sent.last?.prompt, "Hello again")
+        let yours = chat.viewModel.messages.filter { $0.role == .user }
+        XCTAssertEqual(yours.map(\.id), [yourMessage.id])
+        XCTAssertEqual(yours.map(\.content), ["Hello again"])
+        XCTAssertEqual(chat.viewModel.inputText, "Half-written draft", "your draft is left alone")
+    }
+
+    // Every send opens a new socket with the saved session, so it must be cut back first.
+    @MainActor
+    func testRedoRewindsTheSessionBeforeSending() async throws {
+        let chat = try await makeChatWithOneTurn()
+        let reply = try XCTUnwrap(chat.viewModel.messages.last { $0.role == .agent })
+
+        chat.viewModel.retryAgentMessage(reply)
+        await waitUntil {
+            await chat.remote.sentRequestSnapshot().count == 2
+        }
+
+        let calls = await chat.remote.callSnapshot()
+        // The prompt goes with it, so the cut lands on that message and not one Core added.
+        let rewind = try XCTUnwrap(calls.firstIndex(of: "rewindLatestTurn:Hello"))
+        let resend = try XCTUnwrap(calls.lastIndex(of: "send:Hello:0"))
+        XCTAssertLessThan(rewind, resend)
+    }
+
+    // A second click before the send has started must not rewind a second time.
+    @MainActor
+    func testADoubleClickedRetryRewindsOnce() async throws {
+        let chat = try await makeChatWithOneTurn()
+        let reply = try XCTUnwrap(chat.viewModel.messages.last { $0.role == .agent })
+
+        chat.viewModel.retryAgentMessage(reply)
+        XCTAssertFalse(chat.viewModel.canRetryAgentMessage(reply))
+        chat.viewModel.retryAgentMessage(reply)
+        await waitUntil {
+            await chat.remote.sentRequestSnapshot().count == 2
+        }
+
+        let rewinds = await chat.remote.callSnapshot().filter { $0.hasPrefix("rewindLatestTurn") }
+        XCTAssertEqual(rewinds.count, 1)
+    }
+
+    @MainActor
+    func testNothingChangesWhenTheSessionCannotBeRewound() async throws {
+        let chat = try await makeChatWithOneTurn(rewindSucceeds: false)
+        let before = chat.viewModel.messages
+        let reply = try XCTUnwrap(before.last { $0.role == .agent })
+
+        chat.viewModel.retryAgentMessage(reply)
+        await waitUntil {
+            chat.viewModel.messages.last?.role == .system
+        }
+
+        XCTAssertEqual(Array(chat.viewModel.messages.dropLast()), before)
+        let sentCount = await chat.remote.sentRequestSnapshot().count
+        XCTAssertEqual(sentCount, 1)
+    }
+
+    private struct RedoChat {
+        let viewModel: ChatViewModel
+        let remote: StubRemoteAgentClient
+        let service: ConnectOnionService
+    }
+
+    /// A chat where you sent "Hello" and the agent replied.
+    @MainActor
+    private func makeChatWithOneTurn(rewindSucceeds: Bool = true) async throws -> RedoChat {
+        let appViewModel = AppViewModel(storage: makeIsolatedDefaults())
+        let address = "0x" + String(repeating: "47", count: 32)
+        let endpoint = ConnectOnionResolvedEndpoint(
+            agentAddress: address,
+            webSocketURL: try XCTUnwrap(URL(string: "wss://agent.test/ws")),
+            httpBaseURL: try XCTUnwrap(URL(string: "https://agent.test")),
+            isDirect: true,
+            info: nil
+        )
+        let remote = await StubRemoteAgentClient(endpoint: endpoint, rewindSucceeds: rewindSucceeds)
+        let configuration = GeneralAgentConfiguration(
+            name: "Main Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(agentAddress: address)
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Redo")
+        let service = ConnectOnionService(
+            conversationID: session.id,
+            remoteAgentFactory: { _, _, _ in remote }
+        )
+        let viewModel = ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: service,
+            appViewModel: appViewModel
+        )
+        viewModel.connectIfNeeded()
+        await waitUntil {
+            service.isHostedAgentStatusLive
+        }
+        viewModel.inputText = "Hello"
+        viewModel.sendMessage()
+        await waitUntil {
+            await remote.sentRequestSnapshot().count == 1
+                && !service.isAgentRequestActive
+        }
+        if !viewModel.messages.contains(where: { $0.role == .agent }) {
+            viewModel.handleIncomingEvent(.output("First response"))
+        }
+        return RedoChat(viewModel: viewModel, remote: remote, service: service)
+    }
+
+    // MARK: - Tool row states
+
+    // The host announces the tool, then asks permission. Until you answer, it isn't running.
+    @MainActor
+    func testToolWaitingOnItsApprovalCardIsAwaitingApproval() {
+        let chat = makeToolChat()
+
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.approvalRequired(touchApproval))
+
+        XCTAssertEqual(chat.toolAwaitingApprovalID, "tool-touch")
+    }
+
+    // The host reports a skipped tool as an error ("User rejected…"); you chose it, so it's Skipped.
+    @MainActor
+    func testSkippedToolStaysSkippedWhenTheHostReportsItAsAnError() {
+        let chat = makeToolChat()
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.approvalRequired(touchApproval))
+
+        chat.submitApproval(.rejectSoft(feedback: ""))
+        chat.handleIncomingEvent(.executionItem(.toolCall(
+            touchTool(status: .error, result: "Error: User rejected tool 'bash'.")
+        )))
+        chat.handleIncomingEvent(.output("Skipped it."))
+
+        XCTAssertEqual(toolStatuses(in: chat), [.skipped])
+        XCTAssertNil(chat.toolAwaitingApprovalID)
+    }
+
+    // Stop while a tool runs: it never finishes, so it must not show as done.
+    @MainActor
+    func testToolRunningWhenYouStopIsInterrupted() {
+        let chat = makeToolChat()
+        chat.service.isAgentRequestActive = true
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+
+        chat.interruptAgent()
+
+        XCTAssertEqual(toolStatuses(in: chat), [.interrupted])
+    }
+
+    // After you stop a batch, the host sends the rest of it no result, but the reply still comes.
+    @MainActor
+    func testToolsLeftWithoutAResultWhenTheReplyArrivesAreInterrupted() {
+        let chat = makeToolChat()
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .running))))
+        chat.handleIncomingEvent(.executionItem(.toolCall(ToolCallExecutionItem(
+            id: "tool-echo",
+            name: "bash",
+            args: ["command": .string("echo hi")],
+            status: .running,
+            result: nil,
+            timingMS: nil
+        ))))
+        chat.handleIncomingEvent(.executionItem(.toolCall(touchTool(status: .done, result: ""))))
+
+        chat.handleIncomingEvent(.output("Stopped as you asked."))
+
+        XCTAssertEqual(toolStatuses(in: chat), [.done, .interrupted])
+    }
+
+    private var touchApproval: ConnectOnionApprovalRequest {
+        ConnectOnionApprovalRequest(
+            id: "approval-touch",
+            tool: "bash",
+            arguments: .object(["command": .string("touch a.txt")]),
+            description: nil,
+            batchRemaining: []
+        )
+    }
+
+    private func touchTool(status: ExecutionStatus, result: String? = nil) -> ToolCallExecutionItem {
+        ToolCallExecutionItem(
+            id: "tool-touch",
+            name: "bash",
+            args: ["command": .string("touch a.txt")],
+            status: status,
+            result: result,
+            timingMS: nil
+        )
+    }
+
+    @MainActor
+    private func toolStatuses(in chat: ChatViewModel) -> [ExecutionStatus] {
+        (chat.executionRuns.last?.items ?? []).compactMap { item in
+            guard case .toolCall(let toolCall) = item else { return nil }
+            return toolCall.status
+        }
+    }
+
+    @MainActor
+    private func makeToolChat() -> ChatViewModel {
+        let configuration = GeneralAgentConfiguration(
+            name: "Main Agent",
+            connectionType: .byAddress,
+            addressConfiguration: AgentAddressConfiguration(
+                agentAddress: "0x" + String(repeating: "49", count: 32)
+            )
+        )
+        let session = ChatSession(agentConfigId: configuration.id, title: "Tools")
+        return ChatViewModel(
+            session: session,
+            configuration: configuration,
+            service: ConnectOnionService(conversationID: session.id),
+            appViewModel: AppViewModel(storage: makeIsolatedDefaults())
+        )
+    }
 }
